@@ -95,14 +95,22 @@ fn compact_batch(raw: Vec<Vec<u8>>, branch: BranchId) -> (Vec<Arc<CompactTx>>, u
 
 /// Checks one mempool transaction against every active lease. Used by tests.
 pub async fn scan_tx(state: &Arc<AppState>, tx: CompactTx) {
-    scan_chunk(state, vec![Arc::new(tx)]).await;
+    scan_tx_at(state, tx, SystemTime::now()).await;
+}
+
+/// Like [`scan_tx`], with a fixed clock for rate-limit tests.
+pub async fn scan_tx_at(state: &Arc<AppState>, tx: CompactTx, now: SystemTime) {
+    scan_chunk_at(state, vec![Arc::new(tx)], now).await;
 }
 
 async fn scan_chunk(state: &Arc<AppState>, txs: Vec<Arc<CompactTx>>) {
+    scan_chunk_at(state, txs, SystemTime::now()).await;
+}
+
+async fn scan_chunk_at(state: &Arc<AppState>, txs: Vec<Arc<CompactTx>>, now: SystemTime) {
     if txs.is_empty() {
         return;
     }
-    let now = SystemTime::now();
     let leases = state.scanner.active_keys(now);
     let chunk = Arc::new(txs);
     let per_tx = if leases.is_empty() {
@@ -136,7 +144,7 @@ async fn scan_chunk(state: &Arc<AppState>, txs: Vec<Arc<CompactTx>>) {
     }
     state.scanner.release();
     tracing::info!(matches = new_all.len(), "mempool lease matches");
-    scanner::alert(state, new_all);
+    scanner::alert(state, new_all, now);
 }
 
 /// Streams the mempool until the process exits. Errors are logged and

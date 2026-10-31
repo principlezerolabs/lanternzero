@@ -1,0 +1,4 @@
+# Fmt and clippy only. MSRV tests use `cargo +1.86` / `cargo +1.89` (see CONTRIBUTING.md).
+[toolchain]
+channel = "1.95.0"
+components = ["rustfmt", "clippy"]

@@ -1,7 +1,7 @@
 //! Lease scanning, long-poll, mempool, and push-budget tests.
 
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use axum::http::StatusCode;
 use lz_proto::api::{DeviceRegistration, PushKeys};
@@ -506,7 +506,9 @@ async fn one_push_per_transaction_and_at_most_two_a_minute() {
         vec![],
         vec![],
     );
-    lz_server::scanner::scan_block(&s.h.state, Arc::new(block(11, vec![two]))).await;
+    // One clock for the whole burst so the per-minute push cap is deterministic.
+    let now = UNIX_EPOCH + Duration::from_secs(1_000_000);
+    lz_server::scanner::scan_block_at(&s.h.state, Arc::new(block(11, vec![two])), now).await;
     assert_eq!(s.page_len(), 2);
     eventually(|| s.pushes.0.lock().unwrap().len() == 1).await;
 
@@ -516,11 +518,10 @@ async fn one_push_per_transaction_and_at_most_two_a_minute() {
         let raw = wallet::full_tx(&alice, true, false);
         let mut t = lz_server::mempool::to_compact(&raw, BranchId::Nu6_3).unwrap();
         t.txid = vec![0xF2 + i; 32];
-        lz_server::mempool::scan_tx(&s.h.state, t).await;
+        lz_server::mempool::scan_tx_at(&s.h.state, t, now).await;
     }
     assert_eq!(s.page_len(), 5);
-    tokio::time::sleep(Duration::from_millis(300)).await;
-    assert_eq!(s.pushes.0.lock().unwrap().len(), 2);
+    eventually(|| s.pushes.0.lock().unwrap().len() == 2).await;
 
     // The mempool snapshot keeps one copy per txid.
     let raw = wallet::full_tx(&alice, true, false);

@@ -18,10 +18,17 @@ use super::{BLOCK_COALESCE, Backfill};
 /// Scans one or more blocks with every active lease, records matches, and
 /// sends instant alerts. Used by [`run`] and by tests.
 pub async fn scan_blocks(state: &Arc<AppState>, blocks: Vec<Arc<CompactBlock>>) {
+    scan_blocks_at(state, blocks, SystemTime::now()).await;
+}
+
+pub async fn scan_blocks_at(
+    state: &Arc<AppState>,
+    blocks: Vec<Arc<CompactBlock>>,
+    now: SystemTime,
+) {
     if blocks.is_empty() {
         return;
     }
-    let now = SystemTime::now();
     let leases = state.scanner.active_keys(now);
     let per_block = if leases.is_empty() {
         vec![]
@@ -57,12 +64,17 @@ pub async fn scan_blocks(state: &Arc<AppState>, blocks: Vec<Arc<CompactBlock>>) 
             "lease matches"
         );
     }
-    alert(state, all_new);
+    alert(state, all_new, now);
 }
 
 /// Scans one block. Convenience wrapper for tests.
 pub async fn scan_block(state: &Arc<AppState>, block: Arc<CompactBlock>) {
-    scan_blocks(state, vec![block]).await;
+    scan_block_at(state, block, SystemTime::now()).await;
+}
+
+/// Like [`scan_block`], with a fixed clock for rate-limit tests.
+pub async fn scan_block_at(state: &Arc<AppState>, block: Arc<CompactBlock>, now: SystemTime) {
+    scan_blocks_at(state, vec![block], now).await;
 }
 
 /// Most instant payment pushes per account per minute. A burst of payments
@@ -73,7 +85,7 @@ pub const PAYMENT_PUSHES_PER_MINUTE: u32 = 2;
 /// Sends instant alerts for newly found events: one push per transaction
 /// per account (a transaction paying several of the account's outputs
 /// yields several events), within [`PAYMENT_PUSHES_PER_MINUTE`].
-pub fn alert(state: &Arc<AppState>, new: Vec<(AccountId, Event)>) {
+pub fn alert(state: &Arc<AppState>, new: Vec<(AccountId, Event)>, now: SystemTime) {
     let mut seen = std::collections::HashSet::new();
     for (account, event) in new {
         if state.scanner.alert_mode(account) != Some(AlertMode::Instant) {
@@ -83,11 +95,7 @@ pub fn alert(state: &Arc<AppState>, new: Vec<(AccountId, Event)>) {
             continue;
         }
         let key: String = account.iter().map(|b| format!("{b:02x}")).collect();
-        if state
-            .payment_push_limiter
-            .check(&key, SystemTime::now())
-            .is_err()
-        {
+        if state.payment_push_limiter.check(&key, now).is_err() {
             continue;
         }
         let state = state.clone();

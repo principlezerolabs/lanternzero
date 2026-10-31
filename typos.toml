@@ -1,0 +1,3 @@
+# Web Push RFC 8291 test vector (base64url) in server/src/webpush.rs.
+[default]
+extend-ignore-re = ["SRpkNtoIAiw4"]

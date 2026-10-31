@@ -123,14 +123,21 @@ one:
 
 ## Before you open a pull request
 
+Fmt and clippy use the pinned toolchain in [`rust-toolchain.toml`](rust-toolchain.toml).
+MSRV checks override it with `cargo +1.86` and `cargo +1.89`.
+
 ```sh
-cargo fmt --all
-cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace
-cargo +1.86 test -p lz-proto    # client-side crates' minimum Rust
-cargo +1.89 test -p lz-server   # the server's minimum Rust
-cargo deny check
+scripts/check.sh                # fmt, clippy, privacy guards, typos; deny/machete if installed
+cargo +stable test --workspace  # CI stable matrix leg (+stable, not the fmt/clippy pin)
+cargo +1.86 test -p lz-proto      # client-side crates' minimum Rust
+cargo +1.89 test -p lz-server     # the server's minimum Rust
+cargo deny check                  # required; also run by scripts/check.sh when cargo-deny is installed
 ```
+
+Optional binaries for a full local match to CI lint:
+[`cargo-deny`](https://github.com/EmbarkStudios/cargo-deny),
+[`cargo-machete`](https://github.com/bnjbvr/cargo-machete),
+[`typos`](https://github.com/crate-ci/typos) (`cargo install typos-cli --locked`).
 
 If you change the chain follower, scanner, or mempool code, also run the
 regtest tests against real Zebra and Zaino (needs Docker; CI runs them too):

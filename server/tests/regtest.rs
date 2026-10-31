@@ -270,7 +270,7 @@ async fn mempool_stream_ends_at_the_next_block() {
         }
         n
     });
-    tokio::time::sleep(Duration::from_secs(2)).await;
+    tokio::time::sleep(Duration::from_secs(5)).await;
     assert!(
         !ended.is_finished(),
         "an empty mempool keeps the stream open"

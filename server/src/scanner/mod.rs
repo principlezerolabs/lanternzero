@@ -27,7 +27,8 @@ mod live;
 pub(crate) use decrypt::trial_decrypt_txs_refs;
 pub use decrypt::{Match, trial_decrypt, trial_decrypt_txs};
 pub use live::{
-    PAYMENT_PUSHES_PER_MINUTE, alert, backfill, run, scan_block, scan_blocks, sweep_loop,
+    PAYMENT_PUSHES_PER_MINUTE, alert, backfill, run, scan_block, scan_block_at, scan_blocks,
+    scan_blocks_at, sweep_loop,
 };
 
 use std::collections::HashMap;
