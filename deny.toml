@@ -1,0 +1,51 @@
+# cargo-deny policy. Wallets embed our client-side crates, so a bad
+# dependency becomes their problem. Run `cargo deny check`.
+
+[graph]
+all-features = false
+
+[advisories]
+version = 2
+# Fail on any RustSec advisory (vulnerable, unmaintained, unsound, yanked).
+# To accept one, add its id here with a comment explaining why.
+ignore = []
+
+[licenses]
+version = 2
+# Permissive licenses compatible with MIT OR Apache-2.0 distribution.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Zlib",
+    "CC0-1.0",
+]
+confidence-threshold = 0.9
+# Allowed licenses no current dependency uses are fine.
+unused-allowed-license = "allow"
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+allow-wildcard-paths = true
+deny = [
+    # No C TLS stacks: use rustls where TLS is needed (server side only).
+    { name = "openssl" },
+    { name = "openssl-sys" },
+    { name = "native-tls" },
+]
+
+# ohttp: use the pure-Rust `rust-hpke` backend, never NSS, and never the
+# feature that prints secrets (invariants 1 and 6).
+[[bans.features]]
+crate = "ohttp"
+deny = ["nss", "gecko", "unsafe-print-secrets"]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

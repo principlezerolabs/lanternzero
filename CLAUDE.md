@@ -49,24 +49,12 @@ Apache-2.0). Business and hosting details live in the private
 - **Spam policy:** during a spam wave, scanners fall behind and catch up. Do
   not provision for peak load.
 
-## Privacy invariants (treat violations as bugs; test for them)
+## Privacy invariants and code rules
 
-1. Viewing keys live **only in scanner memory**: never on disk, in logs, in
-   crash dumps, in backups, or in metrics. A server restart drops them; apps
-   re-send keys at their next wake.
-2. A key is a **lease**, 24 h to 7 days, renewed by the app on each wake. It is
-   dropped at once on opt-out, when the lease expires, or when the paid period
-   ends.
-3. Data derived from a key (matched payments) is deleted when the app
-   acknowledges it, or after 7 days at most. Keep no per-key history.
-4. **Default-mode and scanning-mode users must look identical on the wire.**
-   Every request goes over OHTTP, and everyone gets the same scheduled pings.
-5. Push payloads never carry amounts, memos, or txids in the clear. Anything
-   the device must see is RFC 8291-encrypted to it.
-6. Account tokens are bearer secrets. Never log them or put them where relays
-   can see them; they travel inside the OHTTP-encrypted request.
-7. Never call per-transaction lookups (for example `GetTransaction`) in ways
-   that reveal which transactions matter to a user.
+They live in `CONTRIBUTING.md`, imported below, so humans and agents read the
+same copy. Treat a violation as a bug, and test for it.
+
+@CONTRIBUTING.md
 
 ## Where things go
 
@@ -149,6 +137,8 @@ Apache-2.0). Business and hosting details live in the private
 - This repo is public. No secrets, no customer or pricing details, no
   hosting specifics. Those belong in `lanternzero-ops`.
 - Any code that touches keys or tokens needs tests that prove invariants 1–6
-  hold: no persistence, no logging, leases expire.
+  hold: no persistence, no logging, leases expire. Run the checks listed at
+  the end of `CONTRIBUTING.md`, including `cargo deny check`, before
+  committing.
 - Commit or push only when the user asks.
 - Contributions are dual-licensed MIT OR Apache-2.0 (see `README.md`).

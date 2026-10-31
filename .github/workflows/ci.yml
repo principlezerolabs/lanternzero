@@ -39,12 +39,6 @@ jobs:
         with:
           persist-credentials: false
       - run: rustup toolchain install stable --profile minimal
-      # Invariants 1 and 6: this ohttp feature prints secrets.
-      - name: forbid ohttp unsafe-print-secrets
-        run: |
-          if cargo tree --workspace --locked --target all -e features | grep -q 'unsafe-print-secrets'; then
-            echo "ohttp's unsafe-print-secrets feature is enabled somewhere"; exit 1
-          fi
       # Client-side crates are embedded in wallet SDKs: no async runtime, no
       # TLS stack, no Zcash crates that would clash with the SDK's pins.
       - name: keep client-side crates light
@@ -55,3 +49,15 @@ jobs:
               echo "$crate pulls in a forbidden dependency"; exit 1
             fi
           done
+
+  # Advisories, licenses, banned crates and features (including ohttp's
+  # nss and unsafe-print-secrets), and sources. Policy: deny.toml.
+  cargo-deny:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+        with:
+          command: check
