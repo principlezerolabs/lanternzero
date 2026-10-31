@@ -21,24 +21,29 @@
 //! - **Release rule** (spec §4.3): every new block, match, or reorg bumps a
 //!   counter that releases all waiting long-polls.
 
+mod decrypt;
+mod live;
+
+pub(crate) use decrypt::trial_decrypt_txs_refs;
+pub use decrypt::{Match, trial_decrypt, trial_decrypt_txs};
+pub use live::{
+    PAYMENT_PUSHES_PER_MINUTE, alert, backfill, run, scan_block, scan_blocks, sweep_loop,
+};
+
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use lz_proto::api::{Event, EventKind, EventStatus, Hint, LeaseStatus};
-use lz_proto::event_id::{Pool, event_id};
+use lz_proto::api::{Event, EventKind, EventStatus, Hint, LeaseStatus, MAX_PING_EVENTS};
+use lz_proto::event_id::event_id;
 use lz_proto::lease::{AlertMode, LeaseRequest};
 use prost::Message as _;
-use tokio::sync::{Semaphore, broadcast, watch};
-use zcash_client_backend::proto::compact_formats::{CompactBlock, CompactOrchardAction, CompactTx};
-use zcash_note_encryption::EphemeralKeyBytes;
-use zcash_note_encryption::batch::try_compact_note_decryption;
+use tokio::sync::{Semaphore, watch};
+use zcash_client_backend::proto::compact_formats::{CompactBlock, CompactTx};
 use zeroize::Zeroizing;
 
-use crate::AppState;
-use crate::chain::{BATCH, ChainEvent};
 use crate::store::AccountId;
 use crate::viewkey::ScanKeys;
 
@@ -59,7 +64,6 @@ const MAX_CONCURRENT_BACKFILLS: usize = 4;
 pub const MAX_EVENTS_PER_ACCOUNT: usize = 1024;
 /// Chain blocks trial-decrypted together after coalescing broadcasts.
 const BLOCK_COALESCE: usize = 8;
-use lz_proto::api::MAX_PING_EVENTS;
 
 struct Lease {
     keys: Arc<ScanKeys>,
@@ -137,17 +141,6 @@ pub struct Page {
     pub cursor: u64,
     /// More events remain after `cursor`.
     pub more: bool,
-}
-
-/// One trial-decryption hit.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Match {
-    pub account: AccountId,
-    /// Position of the transaction in `CompactBlock::vtx`.
-    pub tx: usize,
-    pub pool: Pool,
-    /// Output (Sapling) or action (Orchard, Ironwood) index in its bundle.
-    pub index: u32,
 }
 
 impl Scanner {
@@ -748,385 +741,4 @@ fn rfc3339(t: SystemTime) -> String {
                 .ok()
         })
         .unwrap_or_default()
-}
-
-/// Trial-decrypts every shielded output in `block` with each lease's keys.
-/// CPU-bound: call it from a blocking thread.
-pub fn trial_decrypt(block: &CompactBlock, leases: &[(AccountId, Arc<ScanKeys>)]) -> Vec<Match> {
-    trial_decrypt_txs(&block.vtx, leases)
-}
-
-/// [`trial_decrypt`] over a list of transactions; [`Match::tx`] indexes
-/// `txs`.
-pub fn trial_decrypt_txs(txs: &[CompactTx], leases: &[(AccountId, Arc<ScanKeys>)]) -> Vec<Match> {
-    let refs: Vec<&CompactTx> = txs.iter().collect();
-    trial_decrypt_txs_refs(&refs, leases)
-}
-
-pub(crate) fn trial_decrypt_txs_refs(
-    txs: &[&CompactTx],
-    leases: &[(AccountId, Arc<ScanKeys>)],
-) -> Vec<Match> {
-    use orchard::note_encryption::{IronwoodDomain, OrchardDomain};
-    use sapling::note_encryption::{CompactOutputDescription, SaplingDomain, Zip212Enforcement};
-
-    if leases.is_empty() {
-        return vec![];
-    }
-    // (tx position, index in bundle) for each output, in the same order as
-    // the decryption inputs.
-    let mut sapling_at = Vec::new();
-    let mut sapling_out = Vec::new();
-    let mut orchard_at = Vec::new();
-    let mut orchard_out = Vec::new();
-    let mut ironwood_at = Vec::new();
-    let mut ironwood_out = Vec::new();
-    for (t, tx) in txs.iter().enumerate() {
-        for (i, out) in tx.outputs.iter().enumerate() {
-            if let Ok(desc) = CompactOutputDescription::try_from(out) {
-                // Every block the scanner sees is long past Canopy (ZIP 212).
-                sapling_out.push((SaplingDomain::new(Zip212Enforcement::On), desc));
-                sapling_at.push((t, i));
-            }
-        }
-        for (i, act) in tx.actions.iter().enumerate() {
-            if let Some(a) = compact_action(act) {
-                orchard_out.push((OrchardDomain::for_compact_action(&a), a));
-                orchard_at.push((t, i));
-            }
-        }
-        for (i, act) in tx.ironwood_actions.iter().enumerate() {
-            if let Some(a) = compact_action(act) {
-                ironwood_out.push((IronwoodDomain::for_compact_action(&a), a));
-                ironwood_at.push((t, i));
-            }
-        }
-    }
-
-    let mut matches = Vec::new();
-    let mut sapling_ivks = Vec::new();
-    let mut sapling_owner = Vec::new();
-    let mut orchard_ivks = Vec::new();
-    let mut orchard_owner = Vec::new();
-    for (account, keys) in leases {
-        for ivk in &keys.sapling {
-            sapling_ivks.push(ivk.clone());
-            sapling_owner.push(*account);
-        }
-        for ivk in &keys.orchard {
-            orchard_ivks.push(ivk.clone());
-            orchard_owner.push(*account);
-        }
-    }
-    if !sapling_ivks.is_empty() && !sapling_out.is_empty() {
-        record_hits(
-            &mut matches,
-            try_compact_note_decryption(&sapling_ivks, &sapling_out),
-            &sapling_at,
-            &sapling_owner,
-            Pool::Sapling,
-        );
-    }
-    if !orchard_ivks.is_empty() && !orchard_out.is_empty() {
-        record_hits(
-            &mut matches,
-            try_compact_note_decryption(&orchard_ivks, &orchard_out),
-            &orchard_at,
-            &orchard_owner,
-            Pool::Orchard,
-        );
-    }
-    if !orchard_ivks.is_empty() && !ironwood_out.is_empty() {
-        record_hits(
-            &mut matches,
-            try_compact_note_decryption(&orchard_ivks, &ironwood_out),
-            &ironwood_at,
-            &orchard_owner,
-            Pool::Ironwood,
-        );
-    }
-    matches
-}
-
-fn record_hits<T>(
-    matches: &mut Vec<Match>,
-    hits: Vec<Option<(T, usize)>>,
-    at: &[(usize, usize)],
-    owners: &[AccountId],
-    pool: Pool,
-) {
-    for (hit, &(tx, index)) in hits.iter().zip(at) {
-        if let Some((_, ivk_idx)) = hit.as_ref() {
-            matches.push(Match {
-                account: owners[*ivk_idx],
-                tx,
-                pool,
-                index: index as u32,
-            });
-        }
-    }
-}
-
-fn compact_action(act: &CompactOrchardAction) -> Option<orchard::note_encryption::CompactAction> {
-    let nf = Option::from(orchard::note::Nullifier::from_bytes(
-        act.nullifier.as_slice().try_into().ok()?,
-    ))?;
-    let cmx = Option::from(orchard::note::ExtractedNoteCommitment::from_bytes(
-        act.cmx.as_slice().try_into().ok()?,
-    ))?;
-    let epk = EphemeralKeyBytes(act.ephemeral_key.as_slice().try_into().ok()?);
-    let ct: [u8; 52] = act.ciphertext.as_slice().try_into().ok()?;
-    Some(orchard::note_encryption::CompactAction::from_parts(
-        nf, cmx, epk, ct,
-    ))
-}
-
-/// Scans one or more blocks with every active lease, records matches, and
-/// sends instant alerts. Used by [`run`] and by tests.
-pub async fn scan_blocks(state: &Arc<AppState>, blocks: Vec<Arc<CompactBlock>>) {
-    if blocks.is_empty() {
-        return;
-    }
-    let now = SystemTime::now();
-    let leases = state.scanner.active_keys(now);
-    let per_block = if leases.is_empty() {
-        vec![]
-    } else {
-        let blocks = blocks.clone();
-        tokio::task::spawn_blocking(move || {
-            blocks
-                .iter()
-                .enumerate()
-                .map(|(i, block)| (i, trial_decrypt(block, &leases)))
-                .collect::<Vec<_>>()
-        })
-        .await
-        .unwrap_or_default()
-    };
-    let tip = state
-        .chain
-        .tip()
-        .max(blocks.last().map(|b| b.height).unwrap_or(0));
-    let mut all_new = Vec::new();
-    let mut match_count = 0usize;
-    for (i, found) in per_block {
-        let new = state.scanner.record(&blocks[i], &found, tip, now);
-        match_count += found.len();
-        all_new.extend(new);
-    }
-    state.scanner.on_tip(tip);
-    state.scanner.release();
-    if match_count > 0 {
-        tracing::info!(
-            matches = match_count,
-            blocks = blocks.len(),
-            "lease matches"
-        );
-    }
-    alert(state, all_new);
-}
-
-/// Scans one block. Convenience wrapper for tests.
-pub async fn scan_block(state: &Arc<AppState>, block: Arc<CompactBlock>) {
-    scan_blocks(state, vec![block]).await;
-}
-
-/// Most instant payment pushes per account per minute. A burst of payments
-/// (or spam aimed at one address) still reaches the wallet through `wake`
-/// and the long-poll, but can't burn its push budget with Apple or Google.
-pub const PAYMENT_PUSHES_PER_MINUTE: u32 = 2;
-
-/// Sends instant alerts for newly found events: one push per transaction
-/// per account (a transaction paying several of the account's outputs
-/// yields several events), within [`PAYMENT_PUSHES_PER_MINUTE`].
-pub fn alert(state: &Arc<AppState>, new: Vec<(AccountId, Event)>) {
-    let mut seen = std::collections::HashSet::new();
-    for (account, event) in new {
-        if state.scanner.alert_mode(account) != Some(AlertMode::Instant) {
-            continue;
-        }
-        if !seen.insert((account, event.compact_tx.clone())) {
-            continue;
-        }
-        let key: String = account.iter().map(|b| format!("{b:02x}")).collect();
-        if state
-            .payment_push_limiter
-            .check(&key, SystemTime::now())
-            .is_err()
-        {
-            continue;
-        }
-        let state = state.clone();
-        tokio::spawn(async move { crate::push::send_payment(&state, account, &event).await });
-    }
-}
-
-/// Scans `bf.from..=bf.to` for one lease. Stops early if the lease ends or
-/// is replaced, so its keys aren't held longer than needed.
-pub async fn backfill(state: Arc<AppState>, bf: Backfill) {
-    let Some(source) = state.chain_source.clone() else {
-        return;
-    };
-    let Ok(_permit) = state.scanner.backfills.clone().acquire_owned().await else {
-        return;
-    };
-    let mut start = bf.from;
-    let mut found_any = false;
-    while start <= bf.to {
-        if !state
-            .scanner
-            .is_current(bf.account, bf.generation, SystemTime::now())
-        {
-            return;
-        }
-        let end = bf.to.min(start + BATCH - 1);
-        let blocks = match source.blocks(start, end).await {
-            Ok(b) => b,
-            Err(e) => {
-                tracing::warn!(error = %e, "backfill stopped");
-                return;
-            }
-        };
-        if blocks.is_empty() {
-            break;
-        }
-        let leases = vec![(bf.account, bf.keys.clone())];
-        let blocks = Arc::new(blocks);
-        let b = blocks.clone();
-        let matches: Vec<(usize, Vec<Match>)> = tokio::task::spawn_blocking(move || {
-            b.iter()
-                .enumerate()
-                .map(|(i, block)| (i, trial_decrypt(block, &leases)))
-                .filter(|(_, m)| !m.is_empty())
-                .collect()
-        })
-        .await
-        .unwrap_or_default();
-        let tip = state.chain.tip();
-        for (i, m) in matches {
-            if !state
-                .scanner
-                .is_current(bf.account, bf.generation, SystemTime::now())
-            {
-                return;
-            }
-            let new = state.scanner.record(&blocks[i], &m, tip, SystemTime::now());
-            found_any |= !new.is_empty();
-        }
-        start = end + 1;
-    }
-    // Payments sent but not yet mined. No pushes here either.
-    let pending = state.scanner.mempool_snapshot();
-    if !pending.is_empty()
-        && state
-            .scanner
-            .is_current(bf.account, bf.generation, SystemTime::now())
-    {
-        let leases = vec![(bf.account, bf.keys.clone())];
-        let pending = Arc::new(pending);
-        let pending2 = pending.clone();
-        let matches = tokio::task::spawn_blocking(move || {
-            let refs: Vec<&CompactTx> = pending2.iter().map(|t| t.as_ref()).collect();
-            trial_decrypt_txs_refs(&refs, &leases)
-        })
-        .await
-        .unwrap_or_default();
-        for m in matches {
-            let new = state.scanner.record_mempool(
-                &pending[m.tx],
-                &[Match { tx: 0, ..m }],
-                SystemTime::now(),
-            );
-            found_any |= !new.is_empty();
-        }
-    }
-    if found_any {
-        state.scanner.release();
-    }
-}
-
-fn catch_up_after_lag(state: &Arc<AppState>, last_height: &mut u64, skipped: u64) {
-    tracing::warn!(skipped, "scanner fell behind the chain");
-    let tip = state.chain.tip();
-    for (account, keys) in state.scanner.active_keys(SystemTime::now()) {
-        let generation = state.scanner.lease_generation(account);
-        if let Some(generation) = generation
-            && *last_height < tip
-        {
-            tokio::spawn(backfill(
-                state.clone(),
-                Backfill {
-                    account,
-                    keys,
-                    generation,
-                    from: *last_height + 1,
-                    to: tip,
-                },
-            ));
-        }
-    }
-    *last_height = tip;
-}
-
-/// Follows chain events until the process exits.
-pub async fn run(state: Arc<AppState>) {
-    let mut rx = state.chain.subscribe();
-    let mut last_height = 0u64;
-    loop {
-        match rx.recv().await {
-            Ok(ChainEvent::Connected(first)) => {
-                let mut batch = vec![first];
-                let mut after_scan: Option<ChainEvent> = None;
-                let mut lagged: Option<u64> = None;
-                while batch.len() < BLOCK_COALESCE {
-                    match rx.try_recv() {
-                        Ok(ChainEvent::Connected(block)) => batch.push(block),
-                        Ok(other @ (ChainEvent::Disconnected(_) | ChainEvent::Reset(_))) => {
-                            after_scan = Some(other);
-                            break;
-                        }
-                        Err(broadcast::error::TryRecvError::Lagged(n)) => {
-                            lagged = Some(n);
-                            break;
-                        }
-                        Err(broadcast::error::TryRecvError::Closed) => return,
-                        Err(broadcast::error::TryRecvError::Empty) => break,
-                    }
-                }
-                last_height = batch.last().map(|b| b.height).unwrap_or(last_height);
-                scan_blocks(&state, batch).await;
-                match after_scan {
-                    Some(ChainEvent::Disconnected(b)) => {
-                        last_height = b.height.saturating_sub(1);
-                        state.scanner.on_disconnect(b.height);
-                        state.scanner.release();
-                    }
-                    Some(ChainEvent::Reset(b)) => last_height = b.height,
-                    _ => {}
-                }
-                if let Some(n) = lagged {
-                    catch_up_after_lag(&state, &mut last_height, n);
-                }
-            }
-            Ok(ChainEvent::Disconnected(b)) => {
-                last_height = b.height.saturating_sub(1);
-                state.scanner.on_disconnect(b.height);
-                state.scanner.release();
-            }
-            Ok(ChainEvent::Reset(b)) => last_height = b.height,
-            Err(broadcast::error::RecvError::Lagged(n)) => {
-                catch_up_after_lag(&state, &mut last_height, n);
-            }
-            Err(broadcast::error::RecvError::Closed) => return,
-        }
-    }
-}
-
-/// Drops expired leases and events every minute.
-pub async fn sweep_loop(state: Arc<AppState>) {
-    let mut tick = tokio::time::interval(Duration::from_secs(60));
-    loop {
-        tick.tick().await;
-        state.scanner.sweep(SystemTime::now());
-    }
 }
