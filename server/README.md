@@ -3,8 +3,8 @@
 The Lantern Zero server: scheduled wake-ups, the opt-in scanner with in-memory
 key leases, the hint list, and long-poll endpoints.
 
-**Status: skeleton.** Default mode works end to end. Scanning does not exist
-yet.
+**Status: prototype.** Default mode and incoming-payment scanning work end
+to end against a fake chain source. Not yet run against a real Zaino.
 
 ## What works
 
@@ -13,7 +13,10 @@ yet.
 | OHTTP gateway | §3.1–3.3 | Key configuration (RFC 9540), relay purpose opt-in, fixed 4096-byte inner requests and responses, zero-padding checks |
 | `POST /v0/info` | §4.7 | |
 | `POST /v0/devices`, `DELETE /v0/devices/{id}` | §4.1 | Shape checks, SSRF rules, per-account device cap |
-| `POST /v0/wake` | §4.2 | `lease: null` only; a lease gets `501 scanning-unavailable` and its keys are dropped at once |
+| `POST /v0/wake` | §4.2 | Leases of 1–4 UIVKs (ZIP 316 Revision 0 or 2, either case), renewed on each wake, backfilled from `from_height` (at most 7 days of blocks); `lease: null` drops the lease and its events at once; acks; hints; events paged to the fixed size |
+| `POST /v0/events` | §4.3 | Long-poll held until the server-wide release (new block, match, or reorg) plus 0–2 s jitter, or 25–30 s; never early, even with events pending; `wait: 0` for `next` pages |
+| Scanner | §4.4, §6.1 | Trial decryption of Sapling outputs and Orchard and Ironwood actions in compact blocks, for every active lease; deterministic event ids; `mined` → `reorged` → re-mined; confirmations up to the finality depth; events deleted on ack or after 7 days; expired leases swept every minute; catches up after falling behind |
+| Payment alerts | §5.2 | `instant`: an extra `Urgency: high` push per new event; `private`: up to 4 events inside the scheduled ping, same 1024-byte size. Backfilled payments don't push |
 | Replay protection | §3.4 | `Date` within 60 s; `seq` windows per device, or per account for registration; `409 stale-seq` with `min_seq` |
 | Rate limits | §3.5 | Per account and per device, per minute; `429` with `Retry-After`, delivered inside OHTTP |
 | Chain follower | §6.1 | Follows Zaino or lightwalletd with `GetLatestBlock` and `GetBlockRange` only; checks the network; rolls back reorgs up to 100 blocks and starts over at the tip on deeper ones; keeps `tip` current and announces each block to the rest of the server |
@@ -21,7 +24,12 @@ yet.
 
 ## Not yet
 
-- **Scanner and leases**, `POST /v0/events` long-poll, hints, and events.
+- **Mempool scanning** (`GetMempoolStream`): events start at `mined` for now.
+- **Spend alerts.** Leases with `spend_alerts: true` get
+  `501 spend-alerts-unavailable`.
+- **Locked memory.** Keys are zeroed where we hold them as text, but the
+  decoded Sapling and Orchard key types don't zero themselves; deployments
+  must disable swap and core dumps (spec §6.2).
 - **Webhooks, token rotation, account deletion** (§4.5, §4.6).
 - **OHTTP key rotation.** The key configuration never changes yet.
 - **Live account loading.** `new-account` takes effect after a restart.

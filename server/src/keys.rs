@@ -1,5 +1,5 @@
-//! The server's own long-term keys: the OHTTP key configuration and the
-//! VAPID signing key. These are server secrets, not user data, so they live
+//! The server's own long-term keys: the OHTTP key configuration, the VAPID
+//! signing key, and the event-id secret. These are server secrets, not user data, so they live
 //! in `data_dir` with owner-only permissions.
 
 use std::io::Write;
@@ -13,6 +13,7 @@ use crate::webpush::Vapid;
 
 const OHTTP_IKM_FILE: &str = "ohttp-ikm";
 const VAPID_KEY_FILE: &str = "vapid-key";
+const EVENT_ID_SECRET_FILE: &str = "event-id-secret";
 /// Key id of the current OHTTP key configuration.
 const OHTTP_KEY_ID: u8 = 1;
 
@@ -104,4 +105,14 @@ pub fn vapid_key(dir: &Path) -> Result<Vapid, KeyError> {
         Vapid::from_secret(s).is_ok()
     })?);
     Vapid::from_secret(&raw).map_err(|_| KeyError::Corrupt(VAPID_KEY_FILE.into()))
+}
+
+/// The secret for deterministic event ids (spec §4.4). Kept for the server's
+/// lifetime so a re-detected payment keeps its id across restarts.
+pub fn event_id_secret(dir: &Path) -> Result<Zeroizing<[u8; 32]>, KeyError> {
+    Ok(Zeroizing::new(load_or_create_secret(
+        dir,
+        EVENT_ID_SECRET_FILE,
+        |_| true,
+    )?))
 }

@@ -1,0 +1,126 @@
+# Self-host packaging: design note
+
+**Status:** proposal (2026-10-31). Nothing here is built yet.
+
+Packaging is not the hard part of self-hosting Lantern Zero. Two other
+things are:
+
+1. **The node.** Zebra needs about 300 GB and days to sync mainnet. No
+   installer makes that fast. The biggest shortcut is reusing a node the
+   person already runs.
+2. **Push admission.** A self-hosted server can wake a phone only if the
+   wallet vendor's push gateway accepts its pings. Spec §5.3 currently lets
+   gateways allow-list server keys, which would shut self-hosters out. See
+   spec §9 and
+   [issue #6](https://github.com/principlezerolabs/lanternzero/issues/6).
+   Without push, a self-hosted server still gives long-poll and webhooks.
+
+So the packaging stays thin, and the effort goes into these two problems.
+
+## Layers, in build order
+
+### 1. Compose kit, plus `init` and `doctor`
+
+The Compose kit in this folder is the only installer. The server binary gets
+two more subcommands next to `new-account`:
+
+- **`lz-server init`** writes `config.toml` and the data directory
+  (`0700`). It generates the server's own keys (OHTTP seed, VAPID key, event-id
+  secret),
+  reads the onion hostname from the Tor container, and prints the
+  connection URL once, the same way `new-account` does. It writes no
+  secrets into Compose files. `.env` holds paths and options only.
+- **`lz-server doctor`** checks a running install and prints pass, warn,
+  or fail for each check. Its output contains no tokens, keys, URLs, or
+  onion names, so it is safe to paste into an issue or give to the Claude
+  skill. Checks:
+  - the chain source's network matches the config (the chain follower
+    also refuses a mismatch, but only logs it);
+  - the chain tip is current, plus Zebra's sync progress when the kit runs
+    Zebra;
+  - core dumps are off (`RLIMIT_CORE`);
+  - swap is off for the container (`memory.swap.max`), or the host's swap
+    is encrypted;
+  - data directory permissions;
+  - the onion service or the OHTTP gateway answers `/.well-known/ohttp-gateway`;
+  - the clock is within the 60 s replay window (spec §3.4).
+
+The skill (`skill/`) runs `doctor` and explains its results. It never edits
+configuration by hand.
+
+**Profiles:**
+
+| Profile | Runs | For |
+| --- | --- | --- |
+| `full` | Zebra, Zaino, server, Tor | A new box with about 500 GB free |
+| `byo-node` | server, Tor | Someone who already runs Zebra/Zaino or lightwalletd; set `[chain]` to point at it |
+
+`byo-node` should be the documented default for anyone who already has a
+node. A chain source run by a third party works too. It cannot learn which
+payments matter, because the server reads blocks in bulk only (spec §6.1),
+but it could hide blocks and cause missed alerts.
+
+**Transport:** self-hosted servers default to a Tor onion service (spec
+§3.1), so no OHTTP relay is needed. OHTTP stays available as an option.
+
+### 2. Hardening that enforces invariant 1
+
+The workspace forbids `unsafe`, so the server can't `mlock` its memory or
+turn off its own core dumps. Also, the decoded Sapling and Orchard key types
+from the Zcash crates don't zero themselves on drop. The kit must enforce spec §6.2 instead, and
+`doctor` checks that it did:
+
+| Spec §6.2 rule | Compose setting |
+| --- | --- |
+| No core dumps | `ulimits: { core: 0 }` |
+| No swap | `memswap_limit` equal to `mem_limit` (cgroup v2), or the host's swap encrypted |
+| Nothing written outside the data dir | `read_only: true`, with `tmpfs` for `/tmp` |
+| Least privilege | non-root user, `cap_drop: [ALL]`, `security_opt: [no-new-privileges:true]` |
+| Logs | stdout only, with size-capped rotation; the server already never logs tokens, endpoints, or bodies |
+
+This is a reason to ship a packaged setup at all: a hand-rolled install is
+more likely to leave swap or core dumps on.
+
+### 3. Home-node app stores
+
+Self-hosting Zcash users mostly run home-node boxes. Those platforms already
+handle updates, Tor, and backups.
+
+- **StartOS first.** A community package, `bitcoinismoral/zebrad-startos`
+  (Zebra plus lightwalletd), exists as of 2026-10-31. A Lantern Zero
+  package could depend on it, which is the `byo-node` profile in package
+  form. Check its maintenance and its lightwalletd version before
+  depending on it.
+- **Umbrel later.** No Zcash app was found in `getumbrel/umbrel-apps` on
+  2026-10-31, so an Umbrel package would have to ship Zebra too, or wait
+  for someone else to.
+
+### 4. Cloud images: deferred, maybe never
+
+An AMI or a DigitalOcean 1-click image is not planned:
+
+- A cloud VM big enough for a full node is expensive to keep running, for
+  little gain over the hosted service.
+- The viewing keys end up on someone else's hardware anyway, which undercuts
+  the reason to self-host.
+- Each image is one more release artifact to sign and patch.
+
+A short "Compose on any VPS" page covers this case.
+
+## Releases
+
+- Container images are signed (cosign) and published with an SBOM. The kit
+  pins images by digest, never `latest`.
+- Updates are opt-in: the scanner holds viewing keys, so nothing
+  auto-updates. Release notes say whether a release touches key handling.
+- `curl | sh` is never the only install path. If a script exists, it only
+  downloads the signed release, verifies it, and runs `init`.
+- Once reproducible builds exist (planned for the enclave), the same images
+  serve self-hosters, so anyone can check them against the source.
+
+## Not decided
+
+- Whether the `full` profile uses Zaino or lightwalletd, pending the Zaino
+  disk measurements (phase 1, item 4).
+- Which Tor image to use, and who maintains it.
+- Minimum host size for `full`, pending the same measurements.

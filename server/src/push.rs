@@ -1,27 +1,41 @@
-//! Scheduled wake-ups (spec §5.1, §5.3).
+//! Scheduled wake-ups and payment pushes (spec §5.1–5.3).
 //!
-//! Every 30 minutes, on the half hour, each device gets the same fixed-size
-//! ping at a random moment within the first 5 minutes of the slot.
+//! Every 30 minutes, on the half hour, each device gets a fixed-size ping at
+//! a random moment within the first 5 minutes of the slot. Under `private`
+//! alerts the ping carries the account's unacknowledged events; it is the
+//! same size either way. Under `instant` alerts a match also sends an extra
+//! payment push.
 
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use lz_proto::api::{Ping, PingType};
+use lz_proto::api::{Event, Ping, PingType};
 use lz_proto::padding::pad_ping_json;
 use rand::Rng;
 use tokio::task::JoinSet;
 
 use crate::AppState;
 use crate::ssrf;
-use crate::store::Device;
+use crate::store::{AccountId, Device};
 
 pub const WAKE_INTERVAL: Duration = Duration::from_secs(1800);
 /// Pings for one slot are spread over this window.
 pub const SPREAD: Duration = Duration::from_secs(300);
 /// A wake ping is useless after the next slot.
 const WAKE_TTL: Duration = WAKE_INTERVAL;
+/// A payment push stays useful for a day.
+const PAYMENT_TTL: Duration = Duration::from_secs(86_400);
+
+/// Which kind of push to send (spec §5.3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Kind {
+    /// Scheduled: `Urgency: normal`, `TTL: 1800`, `Topic: wake`.
+    Wake,
+    /// Instant payment alert: `Urgency: high`, `TTL: 86400`, no topic.
+    Payment,
+}
 /// Most pushes in flight at once.
 const MAX_CONCURRENT_SENDS: usize = 256;
 /// VAPID tokens must expire within 24 h (RFC 8292 §2); an hour is plenty.
@@ -49,13 +63,28 @@ pub struct RoundStats {
 
 /// The fixed scheduled-ping plaintext, padded to 1024 bytes.
 pub fn wake_plaintext() -> Vec<u8> {
-    let ping = Ping {
-        v: 0,
-        t: PingType::Wake,
-        events: vec![],
-    };
-    pad_ping_json(&serde_json::to_string(&ping).expect("ping serializes"))
-        .expect("an empty ping fits")
+    ping_plaintext(PingType::Wake, vec![])
+}
+
+/// A ping plaintext padded to 1024 bytes. Events never carry `compact_tx`
+/// here; if they don't fit (they always should), they are dropped rather
+/// than changing the size.
+fn ping_plaintext(t: PingType, mut events: Vec<Event>) -> Vec<u8> {
+    for e in &mut events {
+        e.compact_tx = None;
+    }
+    loop {
+        let ping = Ping {
+            v: 0,
+            t,
+            events: events.clone(),
+        };
+        let json = serde_json::to_string(&ping).expect("ping serializes");
+        if let Ok(p) = pad_ping_json(&json) {
+            return p;
+        }
+        events.pop();
+    }
 }
 
 /// Runs forever: waits for each half-hour boundary, then sends a round.
@@ -77,7 +106,8 @@ fn until_next_slot(now: SystemTime) -> Duration {
 
 /// Sends one ping to every device, each after a random delay within `spread`.
 pub async fn wake_round(state: &Arc<AppState>, spread: Duration) -> RoundStats {
-    let body = Arc::new(wake_plaintext());
+    let empty = Arc::new(wake_plaintext());
+    let mut bodies: std::collections::HashMap<AccountId, Arc<Vec<u8>>> = Default::default();
     let permits = Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_SENDS));
     let mut tasks = JoinSet::new();
     let mut stats = RoundStats::default();
@@ -93,13 +123,25 @@ pub async fn wake_round(state: &Arc<AppState>, spread: Duration) -> RoundStats {
         } else {
             rand::rng().random_range(Duration::ZERO..spread)
         };
+        // `private` alerts ride in the ping (spec §5.2); everyone else gets
+        // the empty one. Same size either way.
+        let body = bodies
+            .entry(device.account)
+            .or_insert_with(|| {
+                let events = state.scanner.ping_events(device.account, SystemTime::now());
+                if events.is_empty() {
+                    empty.clone()
+                } else {
+                    Arc::new(ping_plaintext(PingType::Wake, events))
+                }
+            })
+            .clone();
         let state = state.clone();
-        let body = body.clone();
         let permits = permits.clone();
         tasks.spawn(async move {
             tokio::time::sleep(delay).await;
             let _permit = permits.acquire_owned().await.expect("semaphore open");
-            send(&state, &id, &device, &body).await
+            send(&state, &id, &device, &body, Kind::Wake).await
         });
     }
     while let Some(res) = tasks.join_next().await {
@@ -113,9 +155,27 @@ pub async fn wake_round(state: &Arc<AppState>, spread: Duration) -> RoundStats {
     stats
 }
 
-/// Encrypts `plaintext` to the device (RFC 8291) and delivers it as a
-/// scheduled wake (RFC 8030, signed with VAPID). Logs only the device id.
-pub async fn send(state: &AppState, device_id: &str, device: &Device, plaintext: &[u8]) -> Outcome {
+/// Sends an instant payment push for `event` to each of the account's
+/// devices (spec §5.2). The event goes without `compact_tx`.
+pub async fn send_payment(state: &Arc<AppState>, account: AccountId, event: &Event) {
+    let body = ping_plaintext(PingType::Payment, vec![event.clone()]);
+    for (id, device) in state.store.devices() {
+        if device.account != account || state.push_backoff.is_paused(&id, SystemTime::now()) {
+            continue;
+        }
+        send(state, &id, &device, &body, Kind::Payment).await;
+    }
+}
+
+/// Encrypts `plaintext` to the device (RFC 8291) and delivers it (RFC 8030,
+/// signed with VAPID). Logs only the device id.
+pub async fn send(
+    state: &AppState,
+    device_id: &str,
+    device: &Device,
+    plaintext: &[u8],
+    kind: Kind,
+) -> Outcome {
     let push = &state.config.push;
     if ssrf::check_url(
         &device.endpoint,
@@ -127,7 +187,7 @@ pub async fn send(state: &AppState, device_id: &str, device: &Device, plaintext:
         tracing::warn!(device_id, "push endpoint no longer allowed");
         return Outcome::Failed;
     }
-    let Some(request) = build_request(state, device, plaintext) else {
+    let Some(request) = build_request(state, device, plaintext, kind) else {
         tracing::warn!(device_id, "cannot build push request");
         return Outcome::Failed;
     };
@@ -167,7 +227,12 @@ pub async fn send(state: &AppState, device_id: &str, device: &Device, plaintext:
     }
 }
 
-fn build_request(state: &AppState, device: &Device, plaintext: &[u8]) -> Option<reqwest::Request> {
+fn build_request(
+    state: &AppState,
+    device: &Device,
+    plaintext: &[u8],
+    kind: Kind,
+) -> Option<reqwest::Request> {
     let endpoint: http::Uri = device.endpoint.parse().ok()?;
     let ua_public =
         p256::PublicKey::from_sec1_bytes(&URL_SAFE_NO_PAD.decode(&device.p256dh).ok()?).ok()?;
@@ -179,10 +244,17 @@ fn build_request(state: &AppState, device: &Device, plaintext: &[u8]) -> Option<
         state
             .vapid
             .authorization(&endpoint, expires, &state.config.vapid_contact)?;
-    let req = http::Request::post(endpoint)
-        .header("ttl", WAKE_TTL.as_secs())
-        .header("urgency", "normal")
-        .header("topic", "wake")
+    let mut req = http::Request::post(endpoint);
+    req = match kind {
+        Kind::Wake => req
+            .header("ttl", WAKE_TTL.as_secs())
+            .header("urgency", "normal")
+            .header("topic", "wake"),
+        Kind::Payment => req
+            .header("ttl", PAYMENT_TTL.as_secs())
+            .header("urgency", "high"),
+    };
+    let req = req
         .header("content-encoding", "aes128gcm")
         .header("content-type", "application/octet-stream")
         .header("authorization", authorization)

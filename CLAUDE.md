@@ -5,11 +5,11 @@ bridge until Zcash's Tachyon upgrade changes how wallets find payments. Read
 `README.md` first for the user-facing description.
 
 **Status (2026-10-31): pre-alpha, phase 1 of 4: spec and prototype.** The
-draft protocol spec is `spec/v0.md` (rev 3.4); `crates/lz-proto` holds the
-shared protocol types; `server/` is a skeleton (OHTTP gateway, devices,
-default-mode `wake`, 30-minute pings, chain follower). See `server/README.md` for what's
-missing. This is the public, open-source repo (MIT OR
-Apache-2.0). Business and hosting details live in the private
+draft protocol spec is `spec/v0.md` (rev 3.6); `crates/lz-proto` holds the
+shared protocol types; `server/` is a prototype (OHTTP gateway, devices,
+30-minute pings, chain follower, and the scanner with in-memory leases,
+events, hints, and long-poll). See `server/README.md` for what's missing.
+This is the public, open-source repo (MIT OR Apache-2.0). Business and hosting details live in the private
 `principlezerolabs/lanternzero-ops` repo; never put them here.
 
 ## The design, in one screen
@@ -67,8 +67,8 @@ same copy. Treat a violation as a bug, and test for it.
 | `gateway/` | Reference push gateway: accepts encrypted pings, forwards to APNs/FCM |
 | `crates/lz-proto/` | Shared protocol types from the spec: requests and responses, padding, tokens, event ids, replay window. Test vectors in `spec/vectors/` |
 | `client/` | Rust client core for wallets (OHTTP, registration, lease renewal, hint list, long-poll). No I/O: the host app sends the bytes |
-| `deploy/` | Docker Compose self-host kit: Zebra, Zaino, server, optional Tor or OHTTP relay |
-| `skill/` | Claude skill that guides and troubleshoots self-hosting. The Compose files do the installing; the skill never improvises configuration. |
+| `deploy/` | Docker Compose self-host kit: profiles `full` (Zebra, Zaino, server, Tor) and `byo-node` (server and Tor, pointed at an existing node), with hardening for spec §6.2. Plan in `deploy/DESIGN.md` |
+| `skill/` | Claude skill that guides and troubleshoots self-hosting. The Compose files and `lz-server init` do the installing; the skill runs `lz-server doctor` and never improvises configuration. |
 
 ## Technology
 
@@ -122,7 +122,12 @@ same copy. Treat a violation as a bug, and test for it.
 3. Build the reference push gateway.
 4. Measure: iOS wake delivery, the time to scan about 72 blocks on a phone,
    and Zaino's disk usage on a synced mainnet node.
-5. Write the Docker Compose kit and the Claude skill.
+5. Self-host packaging (`deploy/DESIGN.md`): `lz-server init` and
+   `lz-server doctor`, the Compose kit with its two profiles and §6.2
+   hardening, signed images pinned by digest, then the Claude skill.
+6. After phase 1: a StartOS package that depends on the community Zebra
+   package, then Umbrel. Cloud images (AMI, 1-click) are deferred; see the
+   design note for why.
 
 ## Open questions (don't assume answers)
 
@@ -130,6 +135,10 @@ same copy. Treat a violation as a bug, and test for it.
   `suggest_scan_ranges`, and ZODL's Slipstream sync engine, which now drives
   scanning in ZODL wallets. Raise it at the light client working group and
   with ZODL.
+- How push gateways admit self-hosted servers (spec §9, question 3;
+  issue #6). The proposal binds each subscription to one server's VAPID key. Settle it
+  before building the reference gateway, or self-hosted servers get no
+  wake-ups.
 - Whether Apple grants the notification-filtering entitlement. It is
   optional, because opt-in scanning covers fast iOS alerts.
 - Which servers the Tachyon team expects third parties to run: PIR

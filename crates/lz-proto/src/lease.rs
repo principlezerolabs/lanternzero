@@ -60,13 +60,20 @@ impl ViewingKey {
             return None;
         }
         let hrp = s.rsplit_once('1')?.0;
-        const HRPS: [(&str, KeyKind, Network); 6] = [
+        // ZIP 316 Revision 0 prefixes, then Revision 2.
+        const HRPS: [(&str, KeyKind, Network); 12] = [
             ("uivk", KeyKind::Incoming, Network::Main),
             ("uivktest", KeyKind::Incoming, Network::Test),
             ("uivkregtest", KeyKind::Incoming, Network::Regtest),
             ("uview", KeyKind::Full, Network::Main),
             ("uviewtest", KeyKind::Full, Network::Test),
             ("uviewregtest", KeyKind::Full, Network::Regtest),
+            ("uvi", KeyKind::Incoming, Network::Main),
+            ("uvitest", KeyKind::Incoming, Network::Test),
+            ("uviregtest", KeyKind::Incoming, Network::Regtest),
+            ("uvf", KeyKind::Full, Network::Main),
+            ("uvftest", KeyKind::Full, Network::Test),
+            ("uvfregtest", KeyKind::Full, Network::Regtest),
         ];
         HRPS.iter()
             .find(|(h, _, _)| h.eq_ignore_ascii_case(hrp))
@@ -174,6 +181,24 @@ mod tests {
             spend_alerts,
             alert_mode: AlertMode::Instant,
         }
+    }
+
+    #[test]
+    fn accepts_revision_2_prefixes() {
+        assert_eq!(lease(&["uvi1abc"], false).validate(Network::Main), Ok(()));
+        assert_eq!(
+            lease(&["UVITEST1ABC"], false).validate(Network::Test),
+            Ok(())
+        );
+        assert_eq!(lease(&["uvf1abc"], true).validate(Network::Main), Ok(()));
+        assert_eq!(
+            lease(&["uvf1abc"], false).validate(Network::Main),
+            Err(LeaseError::KindMismatch)
+        );
+        assert_eq!(
+            lease(&["uviregtest1abc"], false).validate(Network::Main),
+            Err(LeaseError::WrongNetwork(0))
+        );
     }
 
     #[test]

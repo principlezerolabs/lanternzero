@@ -11,18 +11,33 @@ use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, post};
 use lz_proto::api::{
-    DeviceRegistered, DeviceRegistration, Info, LeaseStatus, SeqOnly, WakeRequest, WakeResponse,
+    DeviceRegistered, DeviceRegistration, EventsRequest, EventsResponse, Info, SeqOnly,
+    WakeRequest, WakeResponse,
 };
+use lz_proto::lease::clamp_duration;
+use lz_proto::padding::RESPONSE_SIZE;
 use lz_proto::token::TokenHash;
+use rand::Rng;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
 use crate::AppState;
+use crate::scanner::{FINALITY_DEPTH, Page};
 use crate::ssrf;
 use crate::store::{AccountId, StoreError};
+use crate::viewkey::ScanKeys;
 
 /// Largest clock difference accepted in an inner request's `Date` (spec §3.4).
 pub const MAX_CLOCK_SKEW: Duration = Duration::from_secs(60);
+/// Most JSON in one response body: the fixed response size less room for
+/// the Binary HTTP status and headers.
+const MAX_JSON: usize = RESPONSE_SIZE - 160;
+/// Most hint ranges in one `wake` response.
+const MAX_HINTS: usize = 32;
+/// Long-poll hold, clamped to this range (spec §4.3).
+const LONG_POLL_SECS: std::ops::RangeInclusive<u32> = 25..=30;
+/// Each released long-poll waits a random delay below this (spec §4.3).
+const RELEASE_JITTER: Duration = Duration::from_secs(2);
 
 /// Builds the API router. Paths are relative to the configured base path.
 pub fn router(state: Arc<AppState>) -> Router {
@@ -31,6 +46,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v0/devices", post(register_device))
         .route("/v0/devices/{device_id}", delete(delete_device))
         .route("/v0/wake", post(wake))
+        .route("/v0/events", post(events))
         .layer(middleware::from_fn(require_date))
         .with_state(state)
 }
@@ -212,7 +228,7 @@ async fn info(State(state): State<Arc<AppState>>) -> Response {
             network: state.config.network,
             wake_interval_secs: crate::push::WAKE_INTERVAL.as_secs() as u32,
             long_poll_wait_secs: [25, 30],
-            finality_depth: 10,
+            finality_depth: FINALITY_DEPTH,
             vapid_public_key: state.vapid.public_b64.clone(),
             ohttp_key_config_sha256: state.ohttp_keys_sha256.clone(),
             attestation: None,
@@ -270,30 +286,121 @@ async fn wake(
     state
         .store
         .accept_device_seq(account, &req.device_id, req.seq)?;
-    if let Some(lease) = &req.lease {
-        lease
-            .validate(state.config.network)
-            .map_err(|_| Problem::bad_request("invalid lease"))?;
-        // The scanner doesn't exist yet. `req` (and the keys in it) is
-        // dropped, and zeroed, on return.
-        return Err(Problem::new(
-            StatusCode::NOT_IMPLEMENTED,
-            "scanning-unavailable",
-            "this server does not offer scanning yet",
-        ));
+    state.scanner.ack(account, &req.ack);
+    let now = SystemTime::now();
+    match &req.lease {
+        None => state.scanner.end_lease(account),
+        Some(lease) => {
+            lease
+                .validate(state.config.network)
+                .map_err(|_| Problem::bad_request("invalid lease"))?;
+            // `req` (and the keys in it) is dropped, and zeroed, on every
+            // return below.
+            if state.chain_source.is_none() {
+                return Err(Problem::new(
+                    StatusCode::NOT_IMPLEMENTED,
+                    "scanning-unavailable",
+                    "this server does not offer scanning",
+                ));
+            }
+            if lease.spend_alerts {
+                return Err(Problem::new(
+                    StatusCode::NOT_IMPLEMENTED,
+                    "spend-alerts-unavailable",
+                    "this server does not offer spend alerts",
+                ));
+            }
+            let keys = ScanKeys::decode(&lease.keys, state.config.network)
+                .map_err(|_| Problem::bad_request("invalid lease"))?;
+            let duration = Duration::from_secs(clamp_duration(lease.duration_secs, None));
+            let tip = state.chain.tip();
+            if let Some(bf) = state
+                .scanner
+                .set_lease(account, keys, lease, duration, tip, now)
+            {
+                tokio::spawn(crate::scanner::backfill(state.clone(), bf));
+            }
+        }
     }
-    Ok(json(
-        StatusCode::OK,
-        &WakeResponse {
-            tip: state.chain.tip(),
-            lease: LeaseStatus {
-                active: false,
-                expires_at: None,
-            },
-            hints: vec![],
-            events: vec![],
-            cursor: "0".to_owned(),
-            next: None,
-        },
-    ))
+    drop(req);
+
+    let mut hints = state.scanner.hints(account);
+    hints.truncate(MAX_HINTS);
+    let mut resp = WakeResponse {
+        tip: state.chain.tip(),
+        lease: state.scanner.lease_status(account, now),
+        hints,
+        events: vec![],
+        cursor: u64::MAX.to_string(),
+        next: Some(u64::MAX.to_string()),
+    };
+    let Page {
+        events,
+        cursor,
+        more,
+    } = state
+        .scanner
+        .page(account, None, MAX_JSON.saturating_sub(json_len(&resp)));
+    resp.events = events;
+    resp.cursor = cursor.to_string();
+    resp.next = more.then(|| cursor.to_string());
+    Ok(json(StatusCode::OK, &resp))
+}
+
+/// `POST /v0/events`: the long-poll (spec §4.3). Holds every poll until the
+/// server-wide release or the wait runs out, even when events are already
+/// pending: an early return would show the relay this account scans
+/// (invariant 4). `wait: 0` returns at once; wallets use it only to fetch a
+/// `next` page.
+async fn events(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Response, Problem> {
+    let account = authenticate(&state, &headers)?;
+    let req: EventsRequest = parse(&body)?;
+    limit_device(&state, &req.device_id)?;
+    state
+        .store
+        .accept_device_seq(account, &req.device_id, req.seq)?;
+    state.scanner.ack(account, &req.ack);
+    let after: u64 = req
+        .cursor
+        .parse()
+        .map_err(|_| Problem::bad_request("invalid cursor"))?;
+    let mut release = state.scanner.subscribe_release();
+    if req.wait > 0 {
+        let wait = Duration::from_secs(
+            req.wait
+                .clamp(*LONG_POLL_SECS.start(), *LONG_POLL_SECS.end())
+                .into(),
+        );
+        tokio::select! {
+            changed = release.changed() => {
+                if changed.is_ok() {
+                    let jitter = rand::rng().random_range(Duration::ZERO..RELEASE_JITTER);
+                    tokio::time::sleep(jitter).await;
+                }
+            }
+            () = tokio::time::sleep(wait) => {}
+        }
+    }
+    let mut resp = EventsResponse {
+        cursor: u64::MAX.to_string(),
+        events: vec![],
+        next: Some(u64::MAX.to_string()),
+    };
+    let page = state.scanner.page(
+        account,
+        Some(after),
+        MAX_JSON.saturating_sub(json_len(&resp)),
+    );
+    resp.events = page.events;
+    resp.cursor = page.cursor.to_string();
+    resp.next = page.more.then(|| page.cursor.to_string());
+    Ok(json(StatusCode::OK, &resp))
+}
+
+fn json_len<T: Serialize>(value: &T) -> usize {
+    serde_json::to_vec(value).map_or(usize::MAX, |v| v.len())
 }

@@ -38,6 +38,15 @@ zeroize = "1.8"
 zcash_client_backend = { version = "0.25", default-features = false, features = ["lightwalletd-tonic"] }
 prost = "0.14"
 tonic = { version = "0.14", default-features = false, features = ["channel", "tls-aws-lc", "tls-webpki-roots"] }
+# Trial decryption and key decoding for the scanner. Same versions as
+# zcash_client_backend 0.25.
+orchard = { version = "0.16", default-features = false, features = ["std"] }
+sapling = { package = "sapling-crypto", version = "0.9", default-features = false, features = ["std"] }
+zcash_note_encryption = "0.5.1"
+zcash_address = "0.14"
+zcash_protocol = "0.11"
+subtle = "2.6"
+time = { version = "0.3.47", features = ["formatting"] }
 
 [dev-dependencies]
 # A fake CompactTxStreamer for the chain follower tests.

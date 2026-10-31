@@ -20,8 +20,10 @@ pub mod gateway;
 pub mod keys;
 pub mod limits;
 pub mod push;
+pub mod scanner;
 pub mod ssrf;
 pub mod store;
+pub mod viewkey;
 pub mod webpush;
 
 use std::sync::Arc;
@@ -39,6 +41,11 @@ pub struct AppState {
     pub http: reqwest::Client,
     /// Best known tip and block announcements, fed by [`chain::run`].
     pub chain: Arc<chain::Chain>,
+    /// The chain source from `[chain]`, if configured. Also used for
+    /// backfills.
+    pub chain_source: Option<chain::Lightwalletd>,
+    /// Leases, events, and hints. Memory only.
+    pub scanner: scanner::Scanner,
     pub account_limiter: limits::RateLimiter,
     pub device_limiter: limits::RateLimiter,
     pub push_backoff: limits::PushBackoff,
@@ -60,6 +67,8 @@ pub enum StartError {
     Ohttp(#[from] ohttp::Error),
     #[error("HTTP client: {0}")]
     Http(#[from] reqwest::Error),
+    #[error(transparent)]
+    Chain(#[from] chain::ChainError),
 }
 
 impl AppState {
@@ -82,6 +91,11 @@ impl AppState {
             .timeout(std::time::Duration::from_secs(15))
             .build()?;
         let store = store::Store::open(&config.data_dir)?;
+        let scanner = scanner::Scanner::new(keys::event_id_secret(&config.data_dir)?);
+        let chain_source = match &config.chain {
+            Some(c) => Some(chain::Lightwalletd::new(&c.lightwalletd)?),
+            None => None,
+        };
         let account_limiter = limits::RateLimiter::new(config.limits.account_per_minute);
         let device_limiter = limits::RateLimiter::new(config.limits.device_per_minute);
         Ok(Arc::new(Self {
@@ -93,6 +107,8 @@ impl AppState {
             vapid,
             http,
             chain: Arc::default(),
+            chain_source,
+            scanner,
             account_limiter,
             device_limiter,
             push_backoff: limits::PushBackoff::default(),
