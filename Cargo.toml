@@ -1,0 +1,19 @@
+[workspace]
+resolver = "3"
+members = ["crates/lz-proto"]
+
+[workspace.package]
+edition = "2024"
+# Client-side crates must build on this version so wallet SDKs can embed them.
+rust-version = "1.86"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/principlezerolabs/lanternzero"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_debug_implementations = "warn"
+
+[workspace.lints.clippy]
+dbg_macro = "deny"
+print_stdout = "deny"
+print_stderr = "deny"

@@ -5,9 +5,10 @@ bridge until Zcash's Tachyon upgrade changes how wallets find payments. Read
 `README.md` first for the user-facing description.
 
 **Status (2026-10-31): pre-alpha, phase 1 of 4: spec and prototype.** The
-draft protocol spec is `spec/v0.md` (rev 3); no code yet. This is the public,
-open-source repo (MIT OR Apache-2.0). Business and hosting details live in
-the private `principlezerolabs/lanternzero-ops` repo; never put them here.
+draft protocol spec is `spec/v0.md` (rev 3.2); `crates/lz-proto` holds the
+shared protocol types. This is the public, open-source repo (MIT OR
+Apache-2.0). Business and hosting details live in the private
+`principlezerolabs/lanternzero-ops` repo; never put them here.
 
 ## The design, in one screen
 
@@ -74,7 +75,8 @@ the private `principlezerolabs/lanternzero-ops` repo; never put them here.
 | `spec/` | URL format and HTTP API: registration, lease renewal, hint list, long-poll, webhooks. **Change the spec first**; code follows. Version it. |
 | `server/` | Chain follower, wake-up scheduler, scanner with RAM leases, hint list, long-poll and webhook endpoints, OHTTP gateway side |
 | `gateway/` | Reference push gateway: accepts encrypted pings, forwards to APNs/FCM |
-| `client/` | Rust client core for wallets (OHTTP, registration, lease renewal, hint list, long-poll), plus Swift and Kotlin bindings |
+| `crates/lz-proto/` | Shared protocol types from the spec: requests and responses, padding, tokens, event ids, replay window. Test vectors in `spec/vectors/` |
+| `client/` | Rust client core for wallets (OHTTP, registration, lease renewal, hint list, long-poll). No I/O: the host app sends the bytes |
 | `deploy/` | Docker Compose self-host kit: Zebra, Zaino, server, optional Tor or OHTTP relay |
 | `skill/` | Claude skill that guides and troubleshoots self-hosting. The Compose files do the installing; the skill never improvises configuration. |
 
@@ -90,8 +92,29 @@ the private `principlezerolabs/lanternzero-ops` repo; never put them here.
   `payjoin/ohttp-relay` was archived in Dec 2025. It forwards only to
   gateways declaring the BIP77 purpose, so it needs a configurable-purpose
   change before it can carry Lantern Zero traffic (spec §9).
-- **Undecided; propose before building:** Cargo workspace layout, binding
-  generator (for example UniFFI), HTTP framework, and gateway storage.
+- **Decided (2026-10-31):**
+  - **Workspace:** one Cargo workspace (`crates/lz-proto`, `server`,
+    `gateway`, `client/core`). Client-side crates (`lz-proto`, client core)
+    must not depend on `zcash_client_backend`, tokio, or a TLS stack, and
+    must build on Rust 1.86, so wallet SDKs with pinned librustzcash
+    versions can embed them.
+  - **Bindings:** none of our own at first. Wallet SDKs (ZODL's use
+    hand-written JNI on Android and `cbindgen` on iOS, in one native
+    library) compile the client crate into that library and expose it
+    through their own FFI. A second Rust static library in the same app
+    risks duplicate symbols. Generate UniFFI bindings only when an app
+    without a Rust core asks.
+  - **Client I/O:** sans-IO. The core builds and opens OHTTP messages; the
+    app sends them with URLSession or OkHttp. An optional `reqwest` feature
+    serves merchant backends and tests.
+  - **HTTP framework:** axum, with the OHTTP gateway as a tower layer in
+    front of the API.
+  - **Gateway storage:** none. The device token rides encrypted inside the
+    endpoint URL; rate limits live in memory.
+  - **Crates:** `ohttp` with the `rust-hpke` backend (never `nss`). CI must
+    fail if `ohttp`'s `unsafe-print-secrets` feature is enabled. APNs via
+    our own small HTTP/2 client (`a2` is unmaintained since 2024); FCM via
+    `gcp_auth` with `reqwest`; Web Push via `web-push-native` or `ece`.
 - **Prior art worth reading:**
   - `samizdatproject/zeccheckout` (MIT): a UFVK scanner over compact blocks
     with mempool polling and signed webhooks.
@@ -111,8 +134,10 @@ the private `principlezerolabs/lanternzero-ops` repo; never put them here.
 
 ## Open questions (don't assume answers)
 
-- The librustzcash hook for feeding outside hints into `suggest_scan_ranges`.
-  Raise it at the light client working group.
+- The hook for feeding outside hints into a wallet's scan order: librustzcash
+  `suggest_scan_ranges`, and ZODL's Slipstream sync engine, which now drives
+  scanning in ZODL wallets. Raise it at the light client working group and
+  with ZODL.
 - Whether Apple grants the notification-filtering entitlement. It is
   optional, because opt-in scanning covers fast iOS alerts.
 - Which servers the Tachyon team expects third parties to run: PIR

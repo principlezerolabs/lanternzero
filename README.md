@@ -42,7 +42,8 @@ people who would rather not run one.
 | [`spec/`](spec/) | URL and API specification |
 | [`server/`](server/) | Wake-ups, scanner, key leases, hint list, long-poll |
 | [`gateway/`](gateway/) | Reference push gateway for wallet vendors |
-| [`client/`](client/) | Rust client core with Swift and Kotlin bindings |
+| [`crates/lz-proto/`](crates/lz-proto/) | Shared protocol types, padding, tokens, and test vectors |
+| [`client/`](client/) | Rust client core that wallet SDKs embed |
 | [`deploy/`](deploy/) | Docker Compose kit for self-hosting |
 | [`skill/`](skill/) | Claude skill that walks you through self-hosting |
 
