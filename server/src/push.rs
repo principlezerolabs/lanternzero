@@ -158,13 +158,23 @@ pub async fn wake_round(state: &Arc<AppState>, spread: Duration) -> RoundStats {
 /// Sends an instant payment push for `event` to each of the account's
 /// devices (spec §5.2). The event goes without `compact_tx`.
 pub async fn send_payment(state: &Arc<AppState>, account: AccountId, event: &Event) {
-    let body = ping_plaintext(PingType::Payment, vec![event.clone()]);
+    let body = Arc::new(ping_plaintext(PingType::Payment, vec![event.clone()]));
+    let permits = Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_SENDS));
+    let mut tasks = JoinSet::new();
+    let now = SystemTime::now();
     for (id, device) in state.store.devices() {
-        if device.account != account || state.push_backoff.is_paused(&id, SystemTime::now()) {
+        if device.account != account || state.push_backoff.is_paused(&id, now) {
             continue;
         }
-        send(state, &id, &device, &body, Kind::Payment).await;
+        let state = state.clone();
+        let body = body.clone();
+        let permits = permits.clone();
+        tasks.spawn(async move {
+            let _permit = permits.acquire_owned().await.expect("semaphore open");
+            send(&state, &id, &device, &body, Kind::Payment).await
+        });
     }
+    while tasks.join_next().await.is_some() {}
 }
 
 /// Encrypts `plaintext` to the device (RFC 8291) and delivers it (RFC 8030,

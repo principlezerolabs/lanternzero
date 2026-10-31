@@ -55,6 +55,10 @@ pub const FINALITY_DEPTH: u32 = 10;
 const MAX_MEMPOOL_BYTES: usize = 64 * 1024 * 1024;
 /// Backfills running at once, to spare the chain source.
 const MAX_CONCURRENT_BACKFILLS: usize = 4;
+/// Unacknowledged events kept per account; oldest drop when over (spec §6.1).
+pub const MAX_EVENTS_PER_ACCOUNT: usize = 1024;
+/// Chain blocks trial-decrypted together after coalescing broadcasts.
+const BLOCK_COALESCE: usize = 8;
 use lz_proto::api::MAX_PING_EVENTS;
 
 struct Lease {
@@ -79,6 +83,8 @@ struct Stored {
     /// Position in the account's update order; cursors refer to it.
     seq: u64,
     created: SystemTime,
+    /// Cached JSON size for paging without reserializing under the lock.
+    json_len: usize,
 }
 
 #[derive(Default)]
@@ -92,6 +98,8 @@ struct Inner {
     leases: HashMap<AccountId, Lease>,
     events: HashMap<AccountId, AccountEvents>,
     next_generation: u64,
+    /// Mined events still gaining confirmations (spec §4.3 finality).
+    unfinalized: Vec<(AccountId, String)>,
 }
 
 /// Scanner state, shared through [`AppState`].
@@ -170,6 +178,7 @@ impl Scanner {
         now: SystemTime,
     ) -> Option<Backfill> {
         let mut inner = self.lock();
+        drop_expired_leases(&mut inner, now);
         let expires_at = now + duration;
         let from = req
             .from_height
@@ -220,12 +229,15 @@ impl Scanner {
     /// events and hints at once.
     pub fn end_lease(&self, account: AccountId) {
         let mut inner = self.lock();
+        drop_expired_leases(&mut inner, SystemTime::now());
         inner.leases.remove(&account);
         inner.events.remove(&account);
+        inner.unfinalized.retain(|(a, _)| *a != account);
     }
 
     pub fn lease_status(&self, account: AccountId, now: SystemTime) -> LeaseStatus {
-        let inner = self.lock();
+        let mut inner = self.lock();
+        drop_expired_leases(&mut inner, now);
         match inner.leases.get(&account).filter(|l| l.expires_at > now) {
             Some(l) => LeaseStatus {
                 active: true,
@@ -238,9 +250,12 @@ impl Scanner {
         }
     }
 
-    /// Whether the account has a lease (expired or not) still in memory.
+    /// Whether the account has an active (unexpired) lease.
     pub fn has_lease(&self, account: AccountId) -> bool {
-        self.lock().leases.contains_key(&account)
+        let now = SystemTime::now();
+        let mut inner = self.lock();
+        drop_expired_leases(&mut inner, now);
+        inner.leases.contains_key(&account)
     }
 
     /// Deletes acknowledged events (and so their hints) for the account.
@@ -254,24 +269,44 @@ impl Scanner {
                 acct.by_id.remove(id);
             }
         }
+        for id in ids {
+            untrack_unfinalized(&mut inner, account, id);
+        }
     }
 
     /// Drops expired leases and events older than [`EVENT_TTL`].
     pub fn sweep(&self, now: SystemTime) {
         let mut inner = self.lock();
-        inner.leases.retain(|_, l| l.expires_at > now);
+        drop_expired_leases(&mut inner, now);
         for acct in inner.events.values_mut() {
             acct.by_id.retain(|_, s| s.created + EVENT_TTL > now);
         }
         inner.events.retain(|_, a| !a.by_id.is_empty());
+        let Inner {
+            events,
+            unfinalized,
+            ..
+        } = &mut *inner;
+        unfinalized.retain(|(account, id)| {
+            events
+                .get(account)
+                .is_some_and(|a| a.by_id.contains_key(id))
+        });
+    }
+
+    /// Generation of an active lease, for a backfill that must stop if the
+    /// lease is replaced.
+    fn lease_generation(&self, account: AccountId) -> Option<u64> {
+        self.lock().leases.get(&account).map(|l| l.generation)
     }
 
     /// The keys of every active lease.
     pub fn active_keys(&self, now: SystemTime) -> Vec<(AccountId, Arc<ScanKeys>)> {
-        self.lock()
+        let mut inner = self.lock();
+        drop_expired_leases(&mut inner, now);
+        inner
             .leases
             .iter()
-            .filter(|(_, l)| l.expires_at > now)
             .map(|(a, l)| (*a, l.keys.clone()))
             .collect()
     }
@@ -310,6 +345,7 @@ impl Scanner {
             };
             let id = event_id(&self.secret[..], &m.account, &txid, m.pool, m.index);
             let confirmations = confirmations(block.height, tip);
+            let compact_tx = URL_SAFE_NO_PAD.encode(tx.encode_to_vec());
             let acct = inner.events.entry(m.account).or_default();
             match acct.by_id.get_mut(&id) {
                 Some(s) => {
@@ -321,10 +357,13 @@ impl Scanner {
                     e.height = Some(block.height);
                     e.confirmations = confirmations;
                     // The block's copy has the transaction's real index.
-                    e.compact_tx = Some(URL_SAFE_NO_PAD.encode(tx.encode_to_vec()));
+                    e.compact_tx = Some(compact_tx.clone());
                     e.rev += 1;
                     acct.last_seq += 1;
                     s.seq = acct.last_seq;
+                    s.json_len = json_len(e);
+                    untrack_unfinalized(&mut inner, m.account, &id);
+                    track_unfinalized(&mut inner, m.account, &id, confirmations);
                 }
                 None => {
                     let event = Event {
@@ -334,18 +373,22 @@ impl Scanner {
                         status: EventStatus::Mined,
                         height: Some(block.height),
                         confirmations,
-                        compact_tx: Some(URL_SAFE_NO_PAD.encode(tx.encode_to_vec())),
+                        compact_tx: Some(compact_tx),
                     };
+                    let json_len = json_len(&event);
                     acct.last_seq += 1;
                     new.push((m.account, event.clone()));
                     acct.by_id.insert(
-                        id,
+                        id.clone(),
                         Stored {
                             event,
                             seq: acct.last_seq,
                             created: now,
+                            json_len,
                         },
                     );
+                    track_unfinalized(&mut inner, m.account, &id, confirmations);
+                    maybe_trim_events(&mut inner, m.account);
                 }
             }
         }
@@ -382,6 +425,7 @@ impl Scanner {
                     s.event.rev += 1;
                     acct.last_seq += 1;
                     s.seq = acct.last_seq;
+                    s.json_len = json_len(&s.event);
                 }
                 Some(_) => {}
                 None => {
@@ -394,6 +438,7 @@ impl Scanner {
                         confirmations: 0,
                         compact_tx: Some(URL_SAFE_NO_PAD.encode(tx.encode_to_vec())),
                     };
+                    let json_len = json_len(&event);
                     acct.last_seq += 1;
                     new.push((m.account, event.clone()));
                     acct.by_id.insert(
@@ -402,8 +447,10 @@ impl Scanner {
                             event,
                             seq: acct.last_seq,
                             created: now,
+                            json_len,
                         },
                     );
+                    maybe_trim_events(&mut inner, m.account);
                 }
             }
         }
@@ -442,36 +489,69 @@ impl Scanner {
     /// Updates confirmations after the tip moved to `tip`.
     pub fn on_tip(&self, tip: u64) {
         let mut inner = self.lock();
-        for acct in inner.events.values_mut() {
-            for s in acct.by_id.values_mut() {
-                let e = &mut s.event;
-                let Some(h) = e.height else { continue };
-                let c = confirmations(h, tip);
-                if e.confirmations < FINALITY_DEPTH && c != e.confirmations {
-                    e.confirmations = c;
-                    e.rev += 1;
-                    acct.last_seq += 1;
-                    s.seq = acct.last_seq;
-                }
+        let pending: Vec<_> = inner.unfinalized.clone();
+        let mut done = Vec::new();
+        for (account, id) in pending {
+            let Some(acct) = inner.events.get_mut(&account) else {
+                done.push((account, id));
+                continue;
+            };
+            let Some(s) = acct.by_id.get_mut(&id) else {
+                done.push((account, id));
+                continue;
+            };
+            let Some(h) = s.event.height else {
+                done.push((account, id));
+                continue;
+            };
+            let c = confirmations(h, tip);
+            if c != s.event.confirmations {
+                s.event.confirmations = c;
+                s.event.rev += 1;
+                acct.last_seq += 1;
+                s.seq = acct.last_seq;
+                s.json_len = json_len(&s.event);
             }
+            if c >= FINALITY_DEPTH {
+                done.push((account, id));
+            }
+        }
+        for (account, id) in done {
+            untrack_unfinalized(&mut inner, account, &id);
         }
     }
 
     /// Marks events in a block that left the best chain as `reorged`.
     pub fn on_disconnect(&self, height: u64) {
         let mut inner = self.lock();
-        for acct in inner.events.values_mut() {
-            for s in acct.by_id.values_mut() {
-                let e = &mut s.event;
-                if e.height == Some(height) {
+        let accounts: Vec<AccountId> = inner.events.keys().copied().collect();
+        let mut remove_unfinalized = Vec::new();
+        for account in accounts {
+            let Some(acct) = inner.events.get_mut(&account) else {
+                continue;
+            };
+            let ids: Vec<String> = acct
+                .by_id
+                .iter()
+                .filter(|(_, s)| s.event.height == Some(height))
+                .map(|(id, _)| id.clone())
+                .collect();
+            for id in ids {
+                if let Some(s) = acct.by_id.get_mut(&id) {
+                    let e = &mut s.event;
                     e.status = EventStatus::Reorged;
                     e.height = None;
                     e.confirmations = 0;
                     e.rev += 1;
                     acct.last_seq += 1;
                     s.seq = acct.last_seq;
+                    s.json_len = json_len(e);
                 }
+                remove_unfinalized.push((account, id));
             }
+        }
+        for (account, id) in remove_unfinalized {
+            untrack_unfinalized(&mut inner, account, &id);
         }
     }
 
@@ -499,7 +579,7 @@ impl Scanner {
         let mut taken = 0;
         for s in &pending {
             let mut event = s.event.clone();
-            let mut size = json_len(&event) + 1;
+            let mut size = s.json_len + 1;
             if size > budget.saturating_sub(2) {
                 event.compact_tx = None;
                 size = json_len(&event) + 1;
@@ -582,7 +662,10 @@ impl Scanner {
     }
 
     pub fn alert_mode(&self, account: AccountId) -> Option<AlertMode> {
-        self.lock().leases.get(&account).map(|l| l.alert_mode)
+        let now = SystemTime::now();
+        let mut inner = self.lock();
+        drop_expired_leases(&mut inner, now);
+        inner.leases.get(&account).map(|l| l.alert_mode)
     }
 
     /// Releases every waiting long-poll (spec §4.3).
@@ -592,6 +675,58 @@ impl Scanner {
 
     pub fn subscribe_release(&self) -> watch::Receiver<u64> {
         self.release.subscribe()
+    }
+}
+
+fn drop_expired_leases(inner: &mut Inner, now: SystemTime) {
+    inner.leases.retain(|_, l| l.expires_at > now);
+}
+
+fn maybe_trim_events(inner: &mut Inner, account: AccountId) {
+    let mut dropped = 0u32;
+    while inner
+        .events
+        .get(&account)
+        .is_some_and(|a| a.by_id.len() > MAX_EVENTS_PER_ACCOUNT)
+    {
+        let drop_id = inner.events.get(&account).and_then(|acct| {
+            acct.by_id
+                .iter()
+                .min_by_key(|(_, s)| (s.created, s.seq))
+                .map(|(id, _)| id.clone())
+        });
+        let Some(drop_id) = drop_id else {
+            break;
+        };
+        if let Some(acct) = inner.events.get_mut(&account) {
+            acct.by_id.remove(&drop_id);
+        }
+        untrack_unfinalized(inner, account, &drop_id);
+        dropped += 1;
+    }
+    if dropped > 0 {
+        let account_hex: String = account.iter().map(|b| format!("{b:02x}")).collect();
+        tracing::info!(account = %account_hex, dropped, "event cap discarded oldest events");
+    }
+}
+
+fn untrack_unfinalized(inner: &mut Inner, account: AccountId, id: &str) {
+    inner
+        .unfinalized
+        .retain(|(a, i)| !(*a == account && i == id));
+}
+
+fn track_unfinalized(inner: &mut Inner, account: AccountId, id: &str, conf: u32) {
+    if conf >= FINALITY_DEPTH {
+        untrack_unfinalized(inner, account, id);
+        return;
+    }
+    if !inner
+        .unfinalized
+        .iter()
+        .any(|(a, i)| *a == account && i == id)
+    {
+        inner.unfinalized.push((account, id.to_owned()));
     }
 }
 
@@ -624,6 +759,14 @@ pub fn trial_decrypt(block: &CompactBlock, leases: &[(AccountId, Arc<ScanKeys>)]
 /// [`trial_decrypt`] over a list of transactions; [`Match::tx`] indexes
 /// `txs`.
 pub fn trial_decrypt_txs(txs: &[CompactTx], leases: &[(AccountId, Arc<ScanKeys>)]) -> Vec<Match> {
+    let refs: Vec<&CompactTx> = txs.iter().collect();
+    trial_decrypt_txs_refs(&refs, leases)
+}
+
+pub(crate) fn trial_decrypt_txs_refs(
+    txs: &[&CompactTx],
+    leases: &[(AccountId, Arc<ScanKeys>)],
+) -> Vec<Match> {
     use orchard::note_encryption::{IronwoodDomain, OrchardDomain};
     use sapling::note_encryption::{CompactOutputDescription, SaplingDomain, Zip212Enforcement};
 
@@ -661,50 +804,67 @@ pub fn trial_decrypt_txs(txs: &[CompactTx], leases: &[(AccountId, Arc<ScanKeys>)
     }
 
     let mut matches = Vec::new();
-    let mut push = |account, hits: Vec<Option<_>>, at: &[(usize, usize)], pool| {
-        for (hit, &(tx, index)) in hits.iter().zip(at) {
-            if hit.is_some() {
-                matches.push(Match {
-                    account,
-                    tx,
-                    pool,
-                    index: index as u32,
-                });
-            }
-        }
-    };
+    let mut sapling_ivks = Vec::new();
+    let mut sapling_owner = Vec::new();
+    let mut orchard_ivks = Vec::new();
+    let mut orchard_owner = Vec::new();
     for (account, keys) in leases {
-        if !keys.sapling.is_empty() && !sapling_out.is_empty() {
-            let hits = try_compact_note_decryption(&keys.sapling, &sapling_out);
-            push(
-                *account,
-                hits.into_iter().map(|h| h.map(|_| ())).collect(),
-                &sapling_at,
-                Pool::Sapling,
-            );
+        for ivk in &keys.sapling {
+            sapling_ivks.push(ivk.clone());
+            sapling_owner.push(*account);
         }
-        if !keys.orchard.is_empty() {
-            if !orchard_out.is_empty() {
-                let hits = try_compact_note_decryption(&keys.orchard, &orchard_out);
-                push(
-                    *account,
-                    hits.into_iter().map(|h| h.map(|_| ())).collect(),
-                    &orchard_at,
-                    Pool::Orchard,
-                );
-            }
-            if !ironwood_out.is_empty() {
-                let hits = try_compact_note_decryption(&keys.orchard, &ironwood_out);
-                push(
-                    *account,
-                    hits.into_iter().map(|h| h.map(|_| ())).collect(),
-                    &ironwood_at,
-                    Pool::Ironwood,
-                );
-            }
+        for ivk in &keys.orchard {
+            orchard_ivks.push(ivk.clone());
+            orchard_owner.push(*account);
         }
     }
+    if !sapling_ivks.is_empty() && !sapling_out.is_empty() {
+        record_hits(
+            &mut matches,
+            try_compact_note_decryption(&sapling_ivks, &sapling_out),
+            &sapling_at,
+            &sapling_owner,
+            Pool::Sapling,
+        );
+    }
+    if !orchard_ivks.is_empty() && !orchard_out.is_empty() {
+        record_hits(
+            &mut matches,
+            try_compact_note_decryption(&orchard_ivks, &orchard_out),
+            &orchard_at,
+            &orchard_owner,
+            Pool::Orchard,
+        );
+    }
+    if !orchard_ivks.is_empty() && !ironwood_out.is_empty() {
+        record_hits(
+            &mut matches,
+            try_compact_note_decryption(&orchard_ivks, &ironwood_out),
+            &ironwood_at,
+            &orchard_owner,
+            Pool::Ironwood,
+        );
+    }
     matches
+}
+
+fn record_hits<T>(
+    matches: &mut Vec<Match>,
+    hits: Vec<Option<(T, usize)>>,
+    at: &[(usize, usize)],
+    owners: &[AccountId],
+    pool: Pool,
+) {
+    for (hit, &(tx, index)) in hits.iter().zip(at) {
+        if let Some((_, ivk_idx)) = hit.as_ref() {
+            matches.push(Match {
+                account: owners[*ivk_idx],
+                tx,
+                pool,
+                index: index as u32,
+            });
+        }
+    }
 }
 
 fn compact_action(act: &CompactOrchardAction) -> Option<orchard::note_encryption::CompactAction> {
@@ -721,27 +881,54 @@ fn compact_action(act: &CompactOrchardAction) -> Option<orchard::note_encryption
     ))
 }
 
-/// Scans one block with every active lease, records the matches, and sends
-/// instant alerts. Used by [`run`] and by tests.
-pub async fn scan_block(state: &Arc<AppState>, block: Arc<CompactBlock>) {
+/// Scans one or more blocks with every active lease, records matches, and
+/// sends instant alerts. Used by [`run`] and by tests.
+pub async fn scan_blocks(state: &Arc<AppState>, blocks: Vec<Arc<CompactBlock>>) {
+    if blocks.is_empty() {
+        return;
+    }
     let now = SystemTime::now();
     let leases = state.scanner.active_keys(now);
-    let found = if leases.is_empty() {
+    let per_block = if leases.is_empty() {
         vec![]
     } else {
-        let b = block.clone();
-        tokio::task::spawn_blocking(move || trial_decrypt(&b, &leases))
-            .await
-            .unwrap_or_default()
+        let blocks = blocks.clone();
+        tokio::task::spawn_blocking(move || {
+            blocks
+                .iter()
+                .enumerate()
+                .map(|(i, block)| (i, trial_decrypt(block, &leases)))
+                .collect::<Vec<_>>()
+        })
+        .await
+        .unwrap_or_default()
     };
-    let tip = state.chain.tip().max(block.height);
-    let new = state.scanner.record(&block, &found, tip, now);
+    let tip = state
+        .chain
+        .tip()
+        .max(blocks.last().map(|b| b.height).unwrap_or(0));
+    let mut all_new = Vec::new();
+    let mut match_count = 0usize;
+    for (i, found) in per_block {
+        let new = state.scanner.record(&blocks[i], &found, tip, now);
+        match_count += found.len();
+        all_new.extend(new);
+    }
     state.scanner.on_tip(tip);
     state.scanner.release();
-    if !new.is_empty() {
-        tracing::info!(height = block.height, matches = new.len(), "lease matches");
+    if match_count > 0 {
+        tracing::info!(
+            matches = match_count,
+            blocks = blocks.len(),
+            "lease matches"
+        );
     }
-    alert(state, new);
+    alert(state, all_new);
+}
+
+/// Scans one block. Convenience wrapper for tests.
+pub async fn scan_block(state: &Arc<AppState>, block: Arc<CompactBlock>) {
+    scan_blocks(state, vec![block]).await;
 }
 
 /// Most instant payment pushes per account per minute. A burst of payments
@@ -836,15 +1023,17 @@ pub async fn backfill(state: Arc<AppState>, bf: Backfill) {
             .is_current(bf.account, bf.generation, SystemTime::now())
     {
         let leases = vec![(bf.account, bf.keys.clone())];
-        let txs: Vec<CompactTx> = pending.iter().map(|t| (**t).clone()).collect();
-        let txs = Arc::new(txs);
-        let t = txs.clone();
-        let matches = tokio::task::spawn_blocking(move || trial_decrypt_txs(&t, &leases))
-            .await
-            .unwrap_or_default();
+        let pending = Arc::new(pending);
+        let pending2 = pending.clone();
+        let matches = tokio::task::spawn_blocking(move || {
+            let refs: Vec<&CompactTx> = pending2.iter().map(|t| t.as_ref()).collect();
+            trial_decrypt_txs_refs(&refs, &leases)
+        })
+        .await
+        .unwrap_or_default();
         for m in matches {
             let new = state.scanner.record_mempool(
-                &txs[m.tx],
+                &pending[m.tx],
                 &[Match { tx: 0, ..m }],
                 SystemTime::now(),
             );
@@ -856,15 +1045,68 @@ pub async fn backfill(state: Arc<AppState>, bf: Backfill) {
     }
 }
 
+fn catch_up_after_lag(state: &Arc<AppState>, last_height: &mut u64, skipped: u64) {
+    tracing::warn!(skipped, "scanner fell behind the chain");
+    let tip = state.chain.tip();
+    for (account, keys) in state.scanner.active_keys(SystemTime::now()) {
+        let generation = state.scanner.lease_generation(account);
+        if let Some(generation) = generation
+            && *last_height < tip
+        {
+            tokio::spawn(backfill(
+                state.clone(),
+                Backfill {
+                    account,
+                    keys,
+                    generation,
+                    from: *last_height + 1,
+                    to: tip,
+                },
+            ));
+        }
+    }
+    *last_height = tip;
+}
+
 /// Follows chain events until the process exits.
 pub async fn run(state: Arc<AppState>) {
     let mut rx = state.chain.subscribe();
     let mut last_height = 0u64;
     loop {
         match rx.recv().await {
-            Ok(ChainEvent::Connected(block)) => {
-                last_height = block.height;
-                scan_block(&state, block).await;
+            Ok(ChainEvent::Connected(first)) => {
+                let mut batch = vec![first];
+                let mut after_scan: Option<ChainEvent> = None;
+                let mut lagged: Option<u64> = None;
+                while batch.len() < BLOCK_COALESCE {
+                    match rx.try_recv() {
+                        Ok(ChainEvent::Connected(block)) => batch.push(block),
+                        Ok(other @ (ChainEvent::Disconnected(_) | ChainEvent::Reset(_))) => {
+                            after_scan = Some(other);
+                            break;
+                        }
+                        Err(broadcast::error::TryRecvError::Lagged(n)) => {
+                            lagged = Some(n);
+                            break;
+                        }
+                        Err(broadcast::error::TryRecvError::Closed) => return,
+                        Err(broadcast::error::TryRecvError::Empty) => break,
+                    }
+                }
+                last_height = batch.last().map(|b| b.height).unwrap_or(last_height);
+                scan_blocks(&state, batch).await;
+                match after_scan {
+                    Some(ChainEvent::Disconnected(b)) => {
+                        last_height = b.height.saturating_sub(1);
+                        state.scanner.on_disconnect(b.height);
+                        state.scanner.release();
+                    }
+                    Some(ChainEvent::Reset(b)) => last_height = b.height,
+                    _ => {}
+                }
+                if let Some(n) = lagged {
+                    catch_up_after_lag(&state, &mut last_height, n);
+                }
             }
             Ok(ChainEvent::Disconnected(b)) => {
                 last_height = b.height.saturating_sub(1);
@@ -873,33 +1115,7 @@ pub async fn run(state: Arc<AppState>) {
             }
             Ok(ChainEvent::Reset(b)) => last_height = b.height,
             Err(broadcast::error::RecvError::Lagged(n)) => {
-                // Spam policy: fall behind, then catch up. Rescan what was
-                // skipped for every lease.
-                tracing::warn!(skipped = n, "scanner fell behind the chain");
-                let tip = state.chain.tip();
-                for (account, keys) in state.scanner.active_keys(SystemTime::now()) {
-                    let generation = state
-                        .scanner
-                        .lock()
-                        .leases
-                        .get(&account)
-                        .map(|l| l.generation);
-                    if let Some(generation) = generation
-                        && last_height < tip
-                    {
-                        tokio::spawn(backfill(
-                            state.clone(),
-                            Backfill {
-                                account,
-                                keys,
-                                generation,
-                                from: last_height + 1,
-                                to: tip,
-                            },
-                        ));
-                    }
-                }
-                last_height = tip;
+                catch_up_after_lag(&state, &mut last_height, n);
             }
             Err(broadcast::error::RecvError::Closed) => return,
         }

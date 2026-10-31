@@ -12,7 +12,8 @@ use lz_proto::api::EventStatus;
 use lz_proto::event_id::Pool;
 use lz_proto::lease::{AlertMode, LeaseRequest, Network, ViewingKey};
 use lz_server::scanner::{
-    EVENT_TTL, FINALITY_DEPTH, MAX_BACKFILL_BLOCKS, Match, Scanner, trial_decrypt,
+    EVENT_TTL, FINALITY_DEPTH, MAX_BACKFILL_BLOCKS, MAX_EVENTS_PER_ACCOUNT, Match, Scanner,
+    trial_decrypt,
 };
 use lz_server::viewkey::{KeyError, ScanKeys};
 use zcash_address::unified::Revision;
@@ -327,14 +328,12 @@ fn leases_renew_replace_end_and_expire() {
     assert!(!s.has_lease(B));
     assert!(s.page(B, None, 3500).events.is_empty());
 
-    // Expiry: the lease stops matching at once, and the sweep drops it.
+    // Expiry: the lease stops matching at once, and keys leave memory.
     let expired = later + WEEK + Duration::from_secs(1);
     assert!(!s.lease_status(A, expired).active);
     assert!(s.active_keys(expired).is_empty());
     assert_eq!(pay(&s, &other, 11, 2, 11, expired), 0);
-    assert!(s.has_lease(A));
-    s.sweep(expired);
-    assert!(!s.has_lease(A), "expired keys stay in memory");
+    assert!(!s.has_lease(A));
 }
 
 #[test]
@@ -437,6 +436,47 @@ fn private_mode_pings_carry_up_to_four_events() {
     let events = s.ping_events(A, now);
     assert_eq!(events.len(), 4);
     assert!(events.iter().all(|e| e.compact_tx.is_none()));
+}
+
+#[test]
+fn caps_stored_events_per_account() {
+    let w = Wallet::new(1);
+    let s = scanner();
+    let now = t0();
+    s.set_lease(
+        A,
+        keys(&w),
+        &lease_req(&w, 1, AlertMode::Instant),
+        WEEK,
+        10,
+        now,
+    );
+    let mut recorded = 0usize;
+    let mut height = 10u64;
+    let mut txid = 0u8;
+    while recorded <= MAX_EVENTS_PER_ACCOUNT {
+        let batch = (MAX_EVENTS_PER_ACCOUNT + 1 - recorded).min(10);
+        let actions: Vec<_> = (0..batch)
+            .map(|j| action(&w.orchard, j as u8, false))
+            .collect();
+        let b = block(height, vec![tx(txid, vec![], actions, vec![])]);
+        let leases = s.active_keys(now);
+        let matches = trial_decrypt(&b, &leases);
+        recorded += s.record(&b, &matches, 30, now).len();
+        height += 1;
+        txid = txid.wrapping_add(1);
+    }
+    let mut total = 0usize;
+    let mut cursor = None;
+    loop {
+        let page = s.page(A, cursor, 10_000_000);
+        total += page.events.len();
+        if !page.more {
+            break;
+        }
+        cursor = Some(page.cursor);
+    }
+    assert_eq!(total, MAX_EVENTS_PER_ACCOUNT);
 }
 
 #[test]

@@ -156,7 +156,7 @@ pub enum EventStatus {
 
 /// A matched transaction (spec §4.3). Derived from a key, so it lives in
 /// server memory only (invariant 3).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Event {
     pub id: String,
     pub rev: u32,
@@ -167,6 +167,23 @@ pub struct Event {
     /// `CompactTx` protobuf bytes, base64url. Omitted in push payloads.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compact_tx: Option<String>,
+}
+
+impl std::fmt::Debug for Event {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Event")
+            .field("id", &self.id)
+            .field("rev", &self.rev)
+            .field("kind", &self.kind)
+            .field("status", &self.status)
+            .field("height", &self.height)
+            .field("confirmations", &self.confirmations)
+            .field(
+                "compact_tx",
+                &self.compact_tx.as_ref().map(|_| "<redacted>"),
+            )
+            .finish()
+    }
 }
 
 /// Webhook delivery body (spec §4.5): the event plus merchant fields.
@@ -259,6 +276,15 @@ mod tests {
             confirmations: 0,
             compact_tx: None,
         }
+    }
+
+    #[test]
+    fn event_debug_redacts_compact_tx() {
+        let mut e = event();
+        e.compact_tx = Some("secretpayload".into());
+        let dbg = format!("{e:?}");
+        assert!(!dbg.contains("secretpayload"));
+        assert!(dbg.contains("redacted"));
     }
 
     #[test]

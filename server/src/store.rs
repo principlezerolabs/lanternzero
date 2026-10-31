@@ -24,13 +24,25 @@ const STATE_FILE: &str = "state.json";
 
 pub type AccountId = [u8; 16];
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Device {
     pub account: AccountId,
     pub endpoint: String,
     pub p256dh: String,
     pub auth: String,
     pub seq: SeqWindow,
+}
+
+impl std::fmt::Debug for Device {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Device")
+            .field("account", &self.account)
+            .field("endpoint", &"<redacted>")
+            .field("p256dh", &"<redacted>")
+            .field("auth", &"<redacted>")
+            .field("seq", &self.seq)
+            .finish()
+    }
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -76,8 +88,27 @@ fn unhex<const N: usize>(s: &str) -> Option<[u8; N]> {
     Some(out)
 }
 
+fn check_private_file(path: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if path.exists() {
+            let mode = std::fs::metadata(path)?.permissions().mode() & 0o777;
+            if mode & 0o077 != 0 {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "data directory file is readable by group or others",
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 impl Store {
     pub fn open(dir: &Path) -> std::io::Result<Self> {
+        check_private_file(&dir.join(ACCOUNTS_FILE))?;
+        check_private_file(&dir.join(STATE_FILE))?;
         let mut accounts = HashMap::new();
         match std::fs::read_to_string(dir.join(ACCOUNTS_FILE)) {
             Ok(text) => {
@@ -129,9 +160,16 @@ impl Store {
         Ok(id)
     }
 
-    /// The account for a token hash, if any.
+    /// The account for a token hash, if any. Compares every stored hash in
+    /// constant time (spec §2.2).
     pub fn authenticate(&self, hash: &TokenHash) -> Option<AccountId> {
-        self.accounts.get(&hash.0).copied()
+        let mut found = None;
+        for (stored, account) in &self.accounts {
+            if TokenHash(*stored).ct_eq(hash) {
+                found = Some(*account);
+            }
+        }
+        found
     }
 
     pub fn register_device(
@@ -364,6 +402,32 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn rejects_loose_data_file_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tmp();
+        std::fs::write(dir.join(STATE_FILE), "{}").unwrap();
+        std::fs::set_permissions(dir.join(STATE_FILE), std::fs::Permissions::from_mode(0o644))
+            .unwrap();
+        assert!(Store::open(&dir).is_err());
+    }
+
+    #[test]
+    fn device_debug_redacts_secrets() {
+        let d = Device {
+            account: [1; 16],
+            endpoint: "https://push.example/secret".into(),
+            p256dh: "pk".into(),
+            auth: "au".into(),
+            seq: SeqWindow::default(),
+        };
+        let dbg = format!("{d:?}");
+        assert!(!dbg.contains("secret"));
+        assert!(!dbg.contains("pk"));
+        assert!(dbg.contains("redacted"));
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn files_are_owner_only() {
         use std::os::unix::fs::PermissionsExt;
         let dir = tmp();
@@ -376,6 +440,22 @@ mod tests {
             let mode = std::fs::metadata(dir.join(f)).unwrap().permissions().mode() & 0o777;
             assert_eq!(mode, 0o600, "{f}");
         }
+    }
+
+    #[test]
+    fn authenticate_uses_constant_time_compare() {
+        let dir = tmp();
+        let t1 = AccountToken::from_bytes([1; 32]);
+        let t2 = AccountToken::from_bytes([2; 32]);
+        let id1 = Store::add_account_to_file(&dir, &t1.hash()).unwrap();
+        let id2 = Store::add_account_to_file(&dir, &t2.hash()).unwrap();
+        let s = Store::open(&dir).unwrap();
+        assert_eq!(s.authenticate(&t1.hash()), Some(id1));
+        assert_eq!(s.authenticate(&t2.hash()), Some(id2));
+        assert_eq!(
+            s.authenticate(&AccountToken::from_bytes([3; 32]).hash()),
+            None
+        );
     }
 
     #[test]

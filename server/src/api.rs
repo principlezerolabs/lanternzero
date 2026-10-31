@@ -20,6 +20,7 @@ use lz_proto::token::TokenHash;
 use rand::Rng;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
+use zeroize::Zeroize;
 
 use crate::AppState;
 use crate::scanner::{FINALITY_DEPTH, Page};
@@ -211,6 +212,22 @@ fn parse<T: DeserializeOwned>(body: &Bytes) -> Result<T, Problem> {
     serde_json::from_slice(body).map_err(|_| Problem::bad_request("malformed JSON body"))
 }
 
+/// Parses JSON and zeroes a uniquely owned body buffer (viewing keys in
+/// `wake` requests).
+fn parse_zero<T: DeserializeOwned>(body: Bytes) -> Result<T, Problem> {
+    match body.try_into_mut() {
+        Ok(mut unique) => {
+            let out = serde_json::from_slice(&unique).map_err(|_| {
+                unique.zeroize();
+                Problem::bad_request("malformed JSON body")
+            })?;
+            unique.zeroize();
+            Ok(out)
+        }
+        Err(body) => parse(&body),
+    }
+}
+
 fn json<T: Serialize>(status: StatusCode, value: &T) -> Response {
     (
         status,
@@ -281,7 +298,7 @@ async fn wake(
     body: Bytes,
 ) -> Result<Response, Problem> {
     let account = authenticate(&state, &headers)?;
-    let req: WakeRequest = parse(&body)?;
+    let req: WakeRequest = parse_zero(body)?;
     limit_device(&state, &req.device_id)?;
     state
         .store
