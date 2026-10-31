@@ -5,9 +5,9 @@ bridge until Zcash's Tachyon upgrade changes how wallets find payments. Read
 `README.md` first for the user-facing description.
 
 **Status (2026-10-31): pre-alpha, phase 1 of 4: spec and prototype.** The
-draft protocol spec is `spec/v0.md` (rev 3.3); `crates/lz-proto` holds the
+draft protocol spec is `spec/v0.md` (rev 3.4); `crates/lz-proto` holds the
 shared protocol types; `server/` is a skeleton (OHTTP gateway, devices,
-default-mode `wake`, 30-minute pings). See `server/README.md` for what's
+default-mode `wake`, 30-minute pings, chain follower). See `server/README.md` for what's
 missing. This is the public, open-source repo (MIT OR
 Apache-2.0). Business and hosting details live in the private
 `principlezerolabs/lanternzero-ops` repo; never put them here.
@@ -104,7 +104,9 @@ same copy. Treat a violation as a bug, and test for it.
   - **Crates:** `ohttp` with the `rust-hpke` backend (never `nss`). CI must
     fail if `ohttp`'s `unsafe-print-secrets` feature is enabled. APNs via
     our own small HTTP/2 client (`a2` is unmaintained since 2024); FCM via
-    `gcp_auth` with `reqwest`; Web Push via `web-push-native` or `ece`.
+    `gcp_auth` with `reqwest`; Web Push is our own small implementation on RustCrypto
+    (`server/src/webpush.rs`), because the existing crates pull in a
+    `crypto-bigint` with timing leaks.
 - **Prior art worth reading:**
   - `samizdatproject/zeccheckout` (MIT): a UFVK scanner over compact blocks
     with mempool polling and signed webhooks.

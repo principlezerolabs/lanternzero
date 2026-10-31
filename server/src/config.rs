@@ -28,10 +28,31 @@ pub struct Config {
     /// reached as a Tor onion service (spec §3.1).
     #[serde(default)]
     pub direct_api: bool,
+    /// Where chain data comes from. Without it, `tip` stays 0 and nothing is
+    /// scanned; only useful for testing push delivery.
+    #[serde(default)]
+    pub chain: Option<ChainConfig>,
     #[serde(default)]
     pub push: PushConfig,
     #[serde(default)]
     pub limits: LimitsConfig,
+}
+
+/// The Zaino or lightwalletd server to follow.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ChainConfig {
+    /// Its gRPC URL, for example `http://127.0.0.1:8137`. Use `https://` for
+    /// anything outside the host or private network.
+    pub lightwalletd: String,
+    /// Seconds between tip checks, 1 to 60. Blocks come every 75 s, and every
+    /// 25 s after NU7.
+    #[serde(default = "default_poll_secs")]
+    pub poll_secs: u64,
+}
+
+fn default_poll_secs() -> u64 {
+    5
 }
 
 /// Request rate limits (spec §3.5). A foreground wallet long-polls about
@@ -100,6 +121,8 @@ pub enum ConfigError {
     BasePath,
     #[error("direct_api is only allowed for .onion hosts")]
     DirectApi,
+    #[error("chain.poll_secs must be between 1 and 60")]
+    PollSecs,
 }
 
 impl Config {
@@ -117,6 +140,11 @@ impl Config {
         }
         if self.direct_api && !self.public_host.ends_with(".onion") {
             return Err(ConfigError::DirectApi);
+        }
+        if let Some(chain) = &self.chain
+            && !(1..=60).contains(&chain.poll_secs)
+        {
+            return Err(ConfigError::PollSecs);
         }
         Ok(())
     }

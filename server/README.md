@@ -16,11 +16,11 @@ yet.
 | `POST /v0/wake` | §4.2 | `lease: null` only; a lease gets `501 scanning-unavailable` and its keys are dropped at once |
 | Replay protection | §3.4 | `Date` within 60 s; `seq` windows per device, or per account for registration; `409 stale-seq` with `min_seq` |
 | Rate limits | §3.5 | Per account and per device, per minute; `429` with `Retry-After`, delivered inside OHTTP |
+| Chain follower | §6.1 | Follows Zaino or lightwalletd with `GetLatestBlock` and `GetBlockRange` only; checks the network; rolls back reorgs up to 100 blocks and starts over at the tip on deeper ones; keeps `tip` current and announces each block to the rest of the server |
 | Wake-up scheduler | §5.1, §5.3 | Every 30 min on the half hour, spread over 5 min; RFC 8291 encryption, VAPID, `TTL`/`Urgency`/`Topic`; drops devices on `404`/`410`; honors a gateway's `429` `Retry-After` (capped at 24 h) |
 
 ## Not yet
 
-- **Chain follower:** `tip` is always `0` until it exists.
 - **Scanner and leases**, `POST /v0/events` long-poll, hints, and events.
 - **Webhooks, token rotation, account deletion** (§4.5, §4.6).
 - **OHTTP key rotation.** The key configuration never changes yet.
@@ -52,5 +52,8 @@ Put TLS in front of it (a reverse proxy), and point an OHTTP relay at
 - **Web Push crypto** (`src/webpush.rs`) is built on RustCrypto primitives
   and checked against the RFC 8291 test vector. Existing Web Push crates
   depend on a `crypto-bigint` with timing leaks (RUSTSEC-2026-0387).
-- **Minimum Rust 1.87**, because of that `crypto-bigint` fix. The server is
-  not embedded in wallets, so the 1.86 rule doesn't apply to it.
+- **Minimum Rust 1.89**, because `zcash_client_backend` 0.25 (the first
+  release with Ironwood) needs it. The server is not embedded in wallets,
+  so the 1.86 rule doesn't apply to it.
+- **Chain source.** Without a `[chain]` section, `tip` stays `0`. Run Zaino
+  on the same host or private network (`http://`), or use `https://`.

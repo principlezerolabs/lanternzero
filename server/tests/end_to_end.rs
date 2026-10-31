@@ -57,6 +57,7 @@ fn harness_with(allow_private_targets: bool, limits: LimitsConfig) -> Harness {
         data_dir: dir,
         vapid_contact: "mailto:ops@lz.test".into(),
         direct_api: false,
+        chain: None,
         push: PushConfig {
             allow_private_targets,
             ..PushConfig::default()

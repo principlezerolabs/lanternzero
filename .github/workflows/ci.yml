@@ -17,8 +17,9 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        # 1.86 is the minimum for client-side crates (see CONTRIBUTING.md).
-        toolchain: [stable, "1.86"]
+        # 1.86 is the minimum for client-side crates (see CONTRIBUTING.md);
+        # 1.89 is the server's.
+        toolchain: [stable, "1.86", "1.89"]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -28,8 +29,10 @@ jobs:
       - if: matrix.toolchain == 'stable'
         run: cargo test --workspace --locked
       # The 1.86 minimum covers only client-side crates (CONTRIBUTING.md).
-      - if: matrix.toolchain != 'stable'
+      - if: matrix.toolchain == '1.86'
         run: cargo test -p lz-proto --locked
+      - if: matrix.toolchain == '1.89'
+        run: cargo test -p lz-server --locked
       - if: matrix.toolchain == 'stable'
         run: cargo fmt --all --check
       - if: matrix.toolchain == 'stable'

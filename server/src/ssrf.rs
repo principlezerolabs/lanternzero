@@ -102,10 +102,11 @@ pub fn check_url(
         return Err(TargetError::NotAllowListed);
     }
     let bare = url.trim_start_matches('[').trim_end_matches(']');
-    if let Ok(ip) = bare.parse::<IpAddr>() {
-        if !allow_private && !is_public(ip) {
-            return Err(TargetError::PrivateAddress);
-        }
+    if let Ok(ip) = bare.parse::<IpAddr>()
+        && !allow_private
+        && !is_public(ip)
+    {
+        return Err(TargetError::PrivateAddress);
     }
     Ok(())
 }

@@ -123,6 +123,7 @@ cargo fmt --all
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 cargo +1.86 test -p lz-proto    # client-side crates' minimum Rust
+cargo +1.89 test -p lz-server   # the server's minimum Rust
 cargo deny check
 ```
 

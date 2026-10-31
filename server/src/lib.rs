@@ -7,11 +7,14 @@
 //! - [`api`]: the `/v0/` endpoints. Reachable only through the gateway,
 //!   except on a self-hosted onion service with `direct_api`.
 //! - [`push`]: the 30-minute wake-up scheduler.
+//! - [`chain`]: the chain follower, which keeps `tip` current and announces
+//!   blocks.
 //!
 //! Nothing in this crate logs request bodies, headers, tokens, or push
 //! endpoints (invariants 1 and 6).
 
 pub mod api;
+pub mod chain;
 pub mod config;
 pub mod gateway;
 pub mod keys;
@@ -22,7 +25,6 @@ pub mod store;
 pub mod webpush;
 
 use std::sync::Arc;
-use std::sync::atomic::AtomicU64;
 
 /// Shared server state.
 pub struct AppState {
@@ -35,8 +37,8 @@ pub struct AppState {
     pub ohttp_keys_sha256: String,
     pub vapid: webpush::Vapid,
     pub http: reqwest::Client,
-    /// Best known chain tip. Set by the chain follower once it exists.
-    pub tip: AtomicU64,
+    /// Best known tip and block announcements, fed by [`chain::run`].
+    pub chain: Arc<chain::Chain>,
     pub account_limiter: limits::RateLimiter,
     pub device_limiter: limits::RateLimiter,
     pub push_backoff: limits::PushBackoff,
@@ -90,7 +92,7 @@ impl AppState {
             ohttp_keys_sha256,
             vapid,
             http,
-            tip: AtomicU64::new(0),
+            chain: Arc::default(),
             account_limiter,
             device_limiter,
             push_backoff: limits::PushBackoff::default(),
@@ -107,6 +109,7 @@ const NOISY_DEPENDENCIES: &[&str] = &[
     "reqwest",
     "rustls",
     "tower_http",
+    "tonic",
 ];
 
 /// The log filter for the server: `RUST_LOG` (or `default`), with

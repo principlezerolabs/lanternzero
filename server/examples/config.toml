@@ -6,6 +6,12 @@ network = "main"
 data_dir = "./lz-data"
 vapid_contact = "mailto:ops@example.org"
 
+[chain]
+# Zaino or lightwalletd gRPC. Use https:// for anything off this host or
+# private network.
+lightwalletd = "http://127.0.0.1:8137"
+poll_secs = 5
+
 [push]
 # Self-hosters may restrict pushes to their wallet vendor's gateway:
 # gateway_allowlist = ["push.examplewallet.app"]

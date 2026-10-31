@@ -9,7 +9,7 @@ use std::time::Duration;
 use lz_proto::token::AccountToken;
 use lz_server::config::Config;
 use lz_server::store::Store;
-use lz_server::{AppState, gateway, push};
+use lz_server::{AppState, chain, gateway, push};
 
 #[tokio::main]
 async fn main() -> ExitCode {
@@ -54,6 +54,23 @@ async fn serve(config: Config) -> ExitCode {
         }
     };
     tokio::spawn(push::run(state.clone()));
+    match &state.config.chain {
+        Some(c) => match chain::Lightwalletd::new(&c.lightwalletd) {
+            Ok(source) => {
+                tokio::spawn(chain::run(
+                    state.chain.clone(),
+                    source,
+                    state.config.network,
+                    Duration::from_secs(c.poll_secs),
+                ));
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "bad [chain] config");
+                return ExitCode::FAILURE;
+            }
+        },
+        None => tracing::warn!("no [chain] configured: tip stays 0 and nothing is scanned"),
+    }
     let flusher = state.clone();
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(Duration::from_secs(10));

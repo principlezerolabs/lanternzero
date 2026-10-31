@@ -1,7 +1,6 @@
 //! The `/v0/` API (spec §4). Mounted behind the OHTTP gateway.
 
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
 use std::time::{Duration, SystemTime};
 
 use axum::Router;
@@ -286,7 +285,7 @@ async fn wake(
     Ok(json(
         StatusCode::OK,
         &WakeResponse {
-            tip: state.tip.load(Ordering::Relaxed),
+            tip: state.chain.tip(),
             lease: LeaseStatus {
                 active: false,
                 expires_at: None,
