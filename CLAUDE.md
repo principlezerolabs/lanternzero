@@ -4,10 +4,10 @@ Lantern Zero gives Zcash wallets faster sync and payment notifications. It is a
 bridge until Zcash's Tachyon upgrade changes how wallets find payments. Read
 `README.md` first for the user-facing description.
 
-**Status (2026-10-31): pre-alpha, phase 1 of 4: spec and prototype.** Only
-READMEs exist so far. This is the public, open-source repo (MIT OR Apache-2.0).
-Business and hosting details live in the private `principlezerolabs/lanternzero-ops`
-repo; never put them here.
+**Status (2026-10-31): pre-alpha, phase 1 of 4: spec and prototype.** The
+draft protocol spec is `spec/v0.md` (rev 3); no code yet. This is the public,
+open-source repo (MIT OR Apache-2.0). Business and hosting details live in
+the private `principlezerolabs/lanternzero-ops` repo; never put them here.
 
 ## The design, in one screen
 
@@ -31,14 +31,20 @@ repo; never put them here.
   server sends each ping to the gateway encrypted to the device with RFC 8291,
   so the gateway, Apple, and Google see only timing.
 - **Transport:** every client request uses Oblivious HTTP (RFC 9458) through
-  an independent relay. OHTTP is request/response only, so use **long-poll**
-  (25–30 s timeout) for live updates, not WebSockets or SSE. Webhooks are for
-  merchants and self-hosters, not phones.
+  a relay run by a third party (neither the server operator nor the wallet
+  vendor; never the server operator). Wallet vendors ship the relay list and
+  rotate among relays. Self-hosted servers may use a Tor onion service
+  instead. Requests and responses are padded to fixed sizes. OHTTP is
+  request/response only, so use **long-poll** (25–30 s timeout) for live
+  updates, not WebSockets or SSE. Webhooks are for merchants and
+  self-hosters, not phones.
 - **Chain data** comes from Zebra and Zaino over the lightwalletd gRPC API
   (`CompactTxStreamer`): `GetBlockRange`, `GetBlockRangeNullifiers`,
   `GetTreeState`, `GetSubtreeRoots`, `GetMempoolStream`.
   - Pools: Sapling, Orchard (spends disabled by soft fork in June 2026), and
-    Ironwood (active since NU6.3, 28 Jul 2026, block 3,428,143).
+    Ironwood (active since NU6.3, 28 Jul 2026, block 3,428,143). One
+    Orchard-protocol IVK trial-decrypts both Orchard and Ironwood notes
+    (ZIP 229, ZIP 326); there is no separate Ironwood key.
 - **Spam policy:** during a spam wave, scanners fall behind and catch up. Do
   not provision for peak load.
 
@@ -75,10 +81,15 @@ repo; never put them here.
 ## Technology
 
 - **Rust** for server, gateway, and client core. Use the Zcash crates
-  (`zcash_client_backend`, `sapling-crypto`, `orchard`, and the Ironwood
-  equivalents) rather than reimplementing note decryption.
+  (`zcash_client_backend`, `sapling-crypto`, `orchard`; Ironwood uses the
+  Orchard protocol, so pick crate versions with NU6.3 support) rather than
+  reimplementing note decryption.
 - **OHTTP:** the `ohttp` and `bhttp` crates (Martin Thomson; also used in
-  Firefox). Relays: `payjoin/ohttp-relay`.
+  Firefox). Relays: the Payjoin relay, now in
+  `payjoin/rust-payjoin` (`payjoin-mailroom`); the standalone
+  `payjoin/ohttp-relay` was archived in Dec 2025. It forwards only to
+  gateways declaring the BIP77 purpose, so it needs a configurable-purpose
+  change before it can carry Lantern Zero traffic (spec §9).
 - **Undecided; propose before building:** Cargo workspace layout, binding
   generator (for example UniFFI), HTTP framework, and gateway storage.
 - **Prior art worth reading:**
