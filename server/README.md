@@ -35,7 +35,9 @@ scanning also against real Zebra and Zaino on regtest
   decoded Sapling and Orchard key types don't zero themselves; deployments
   must disable swap and core dumps (spec §6.2).
 - **Webhooks, token rotation, account deletion** (§4.5, §4.6).
-- **OHTTP key rotation.** The key configuration never changes yet.
+- **Key rotation.** Neither the OHTTP key configuration nor the VAPID key
+  rotates yet. VAPID rotation (spec §5.3) will need a key id per device
+  record, since each subscription is bound to the key it was created with.
 - **Live account loading.** `new-account` takes effect after a restart.
 
 ## Run

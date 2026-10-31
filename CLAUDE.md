@@ -5,7 +5,7 @@ bridge until Zcash's Tachyon upgrade changes how wallets find payments. Read
 `README.md` first for the user-facing description.
 
 **Status (2026-10-31): pre-alpha, phase 1 of 4: spec and prototype.** The
-draft protocol spec is `spec/v0.md` (rev 3.7); `crates/lz-proto` holds the
+draft protocol spec is `spec/v0.md` (rev 3.8); `crates/lz-proto` holds the
 shared protocol types; `server/` is a prototype (OHTTP gateway, devices,
 30-minute pings, chain follower, and the scanner with in-memory leases,
 events, hints, and long-poll). See `server/README.md` for what's missing.
@@ -119,7 +119,9 @@ same copy. Treat a violation as a bug, and test for it.
 1. Write the URL and API spec in `spec/`.
 2. Prototype the server against Zebra and Zaino: 30-min wake-ups, then the
    scanner with RAM-only leases.
-3. Build the reference push gateway.
+3. Build the reference push gateway. It binds each subscription to one
+   server's VAPID key and rate-limits per device, with no admission list
+   (spec §5.3, decided in issue #6), so self-hosted servers get wake-ups.
 4. Measure: iOS wake delivery, the time to scan about 72 blocks on a phone,
    and Zaino's disk usage on a synced mainnet node.
 5. Self-host packaging (`deploy/DESIGN.md`): `lz-server init` and
@@ -135,10 +137,6 @@ same copy. Treat a violation as a bug, and test for it.
   `suggest_scan_ranges`, and ZODL's Slipstream sync engine, which now drives
   scanning in ZODL wallets. Raise it at the light client working group and
   with ZODL.
-- How push gateways admit self-hosted servers (spec §9, question 3;
-  issue #6). The proposal binds each subscription to one server's VAPID key. Settle it
-  before building the reference gateway, or self-hosted servers get no
-  wake-ups.
 - Whether Apple grants the notification-filtering entitlement. It is
   optional, because opt-in scanning covers fast iOS alerts.
 - Which servers the Tachyon team expects third parties to run: PIR

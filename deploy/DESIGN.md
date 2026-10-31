@@ -9,13 +9,16 @@ things are:
    installer makes that fast. The biggest shortcut is reusing a node the
    person already runs.
 2. **Push admission.** A self-hosted server can wake a phone only if the
-   wallet vendor's push gateway accepts its pings. Spec §5.3 currently lets
-   gateways allow-list server keys, which would shut self-hosters out. See
-   spec §9 and
-   [issue #6](https://github.com/principlezerolabs/lanternzero/issues/6).
-   Without push, a self-hosted server still gives long-poll and webhooks.
+   wallet vendor's push gateway accepts its pings. Decided in
+   [issue #6](https://github.com/principlezerolabs/lanternzero/issues/6)
+   (spec rev 3.8, §5.3): gateways bind each subscription to the VAPID key
+   of the server the user chose and must not refuse unknown servers, so a
+   self-hosted server is treated like any other. This depends on wallet
+   vendors' gateways following §5.3; until they do, a self-hosted server
+   still gives long-poll and webhooks.
 
-So the packaging stays thin, and the effort goes into these two problems.
+So the packaging stays thin, and the effort goes into the node, and into
+getting gateways to follow §5.3.
 
 ## Layers, in build order
 
