@@ -5,8 +5,10 @@ bridge until Zcash's Tachyon upgrade changes how wallets find payments. Read
 `README.md` first for the user-facing description.
 
 **Status (2026-10-31): pre-alpha, phase 1 of 4: spec and prototype.** The
-draft protocol spec is `spec/v0.md` (rev 3.2); `crates/lz-proto` holds the
-shared protocol types. This is the public, open-source repo (MIT OR
+draft protocol spec is `spec/v0.md` (rev 3.3); `crates/lz-proto` holds the
+shared protocol types; `server/` is a skeleton (OHTTP gateway, devices,
+default-mode `wake`, 30-minute pings). See `server/README.md` for what's
+missing. This is the public, open-source repo (MIT OR
 Apache-2.0). Business and hosting details live in the private
 `principlezerolabs/lanternzero-ops` repo; never put them here.
 

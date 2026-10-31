@@ -17,7 +17,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        # 1.86 is the minimum for client-side crates (see CLAUDE.md).
+        # 1.86 is the minimum for client-side crates (see CONTRIBUTING.md).
         toolchain: [stable, "1.86"]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -25,7 +25,11 @@ jobs:
           persist-credentials: false
       - run: rustup toolchain install ${{ matrix.toolchain }} --profile minimal --component clippy,rustfmt
       - run: rustup default ${{ matrix.toolchain }}
-      - run: cargo test --workspace --locked
+      - if: matrix.toolchain == 'stable'
+        run: cargo test --workspace --locked
+      # The 1.86 minimum covers only client-side crates (CONTRIBUTING.md).
+      - if: matrix.toolchain != 'stable'
+        run: cargo test -p lz-proto --locked
       - if: matrix.toolchain == 'stable'
         run: cargo fmt --all --check
       - if: matrix.toolchain == 'stable'

@@ -1,0 +1,17 @@
+# Example configuration. TLS is terminated in front of the server.
+listen = "127.0.0.1:8080"
+public_host = "lz.example.org"
+base_path = ""
+network = "main"
+data_dir = "./lz-data"
+vapid_contact = "mailto:ops@example.org"
+
+[push]
+# Self-hosters may restrict pushes to their wallet vendor's gateway:
+# gateway_allowlist = ["push.examplewallet.app"]
+max_devices_per_account = 10
+
+[limits]
+# Requests per minute. A foreground wallet long-polls about every 25 s.
+account_per_minute = 120
+device_per_minute = 30

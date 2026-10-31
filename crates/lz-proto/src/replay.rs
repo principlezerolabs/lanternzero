@@ -25,9 +25,9 @@ pub enum ReplayError {
     TooOld(u64),
 }
 
-/// Replay state for one device. Holds no key material, so servers may store
-/// it on disk.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+/// Replay state for one device or account. Holds no key material, so
+/// servers may store it on disk.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct SeqWindow {
     /// Highest accepted `seq`, if any.
     pub highest: Option<u64>,

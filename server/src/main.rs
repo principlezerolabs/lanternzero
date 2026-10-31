@@ -1,0 +1,139 @@
+//! `lz-server <config.toml>` runs the server.
+//! `lz-server <config.toml> new-account` creates an account and prints its
+//! connection URL once (self-hosting; spec §2.3).
+
+use std::path::PathBuf;
+use std::process::ExitCode;
+use std::time::Duration;
+
+use lz_proto::token::AccountToken;
+use lz_server::config::Config;
+use lz_server::store::Store;
+use lz_server::{AppState, gateway, push};
+
+#[tokio::main]
+async fn main() -> ExitCode {
+    tracing_subscriber::fmt()
+        .with_env_filter(lz_server::log_filter("info"))
+        .init();
+
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let (config_path, command) = match args.as_slice() {
+        [c] => (PathBuf::from(c), None),
+        [c, cmd] => (PathBuf::from(c), Some(cmd.as_str())),
+        _ => {
+            tracing::error!("usage: lz-server <config.toml> [new-account]");
+            return ExitCode::FAILURE;
+        }
+    };
+    let config = match Config::load(&config_path) {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::error!(error = %e, "bad config");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    match command {
+        None => serve(config).await,
+        Some("new-account") => new_account(&config),
+        Some(other) => {
+            tracing::error!(command = other, "unknown command");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+async fn serve(config: Config) -> ExitCode {
+    let listen = config.listen;
+    let state = match AppState::new(config) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!(error = %e, "startup failed");
+            return ExitCode::FAILURE;
+        }
+    };
+    tokio::spawn(push::run(state.clone()));
+    let flusher = state.clone();
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(Duration::from_secs(10));
+        loop {
+            tick.tick().await;
+            flusher.store.flush_if_dirty();
+        }
+    });
+
+    let listener = match tokio::net::TcpListener::bind(listen).await {
+        Ok(l) => l,
+        Err(e) => {
+            tracing::error!(error = %e, %listen, "cannot listen");
+            return ExitCode::FAILURE;
+        }
+    };
+    tracing::info!(%listen, "serving");
+    let app = gateway::router(state.clone());
+    let result = axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal())
+        .await;
+    state.store.flush_if_dirty();
+    match result {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            tracing::error!(error = %e, "server error");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// Resolves on Ctrl-C, or on SIGTERM (`docker stop`, `systemctl stop`), so
+/// replay state is flushed before exit.
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        let _ = tokio::signal::ctrl_c().await;
+    };
+    #[cfg(unix)]
+    let term = async {
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut s) => {
+                s.recv().await;
+            }
+            Err(_) => std::future::pending::<()>().await,
+        }
+    };
+    #[cfg(not(unix))]
+    let term = std::future::pending::<()>();
+    tokio::select! {
+        () = ctrl_c => {}
+        () = term => {}
+    }
+    tracing::info!("shutting down");
+}
+
+/// Generates a token on this machine, stores only its hash, and prints the
+/// connection URL once. The running server picks it up on restart.
+#[allow(clippy::print_stdout)] // Deliberate: the operator must see the URL once.
+fn new_account(config: &Config) -> ExitCode {
+    if let Err(e) = lz_server::keys::create_private_dir(&config.data_dir) {
+        tracing::error!(error = %e, "cannot create data_dir");
+        return ExitCode::FAILURE;
+    }
+    let token = match AccountToken::generate() {
+        Ok(t) => t,
+        Err(e) => {
+            tracing::error!(error = %e, "cannot generate token");
+            return ExitCode::FAILURE;
+        }
+    };
+    if let Err(e) = Store::add_account_to_file(&config.data_dir, &token.hash()) {
+        tracing::error!(error = %e, "cannot write account");
+        return ExitCode::FAILURE;
+    }
+    println!(
+        "lanternzero://{}{}#{}",
+        config.public_host,
+        config.base_path,
+        token.encode().as_str()
+    );
+    println!("Restart the server to load the new account. This URL is shown only once.");
+    ExitCode::SUCCESS
+}

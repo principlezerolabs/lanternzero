@@ -13,3 +13,6 @@
 .idea/
 .vscode/
 .DS_Store
+
+# Server data directories (keys, token hashes): never commit
+lz-data/
