@@ -11,7 +11,7 @@ publish = false
 # Keep this list small: wallet SDKs embed this crate. No tokio, no TLS, no
 # Zcash crates.
 [dependencies]
-base64 = "0.22"
+base64 = "0.23"
 crc32fast = "1.4"
 getrandom = "0.3"
 hmac = "0.12"

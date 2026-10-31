@@ -13,7 +13,7 @@ publish = false
 [dependencies]
 lz-proto = { path = "../crates/lz-proto" }
 axum = "0.8"
-base64 = "0.22"
+base64 = "0.23"
 bhttp = "0.8"
 http = "1"
 httpdate = "1"
