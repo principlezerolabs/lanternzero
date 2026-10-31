@@ -16,7 +16,8 @@ to end against a fake chain source. Not yet run against a real Zaino.
 | `POST /v0/wake` | §4.2 | Leases of 1–4 UIVKs (ZIP 316 Revision 0 or 2, either case), renewed on each wake, backfilled from `from_height` (at most 7 days of blocks); `lease: null` drops the lease and its events at once; acks; hints; events paged to the fixed size |
 | `POST /v0/events` | §4.3 | Long-poll held until the server-wide release (new block, match, or reorg) plus 0–2 s jitter, or 25–30 s; never early, even with events pending; `wait: 0` for `next` pages |
 | Scanner | §4.4, §6.1 | Trial decryption of Sapling outputs and Orchard and Ironwood actions in compact blocks, for every active lease; deterministic event ids; `mined` → `reorged` → re-mined; confirmations up to the finality depth; events deleted on ack or after 7 days; expired leases swept every minute; catches up after falling behind |
-| Payment alerts | §5.2 | `instant`: an extra `Urgency: high` push per new event; `private`: up to 4 events inside the scheduled ping, same 1024-byte size. Backfilled payments don't push |
+| Mempool | §4.3, §6.1 | `GetMempoolStream`, reopened after each block; full transactions (v5 and v6) cut to `CompactTx` and trial-decrypted like blocks; matches are `mempool` events that become `mined` with the same id; a new lease is checked against the pending mempool, kept in compact form up to 64 MiB; an unknown branch id is logged, not fatal |
+| Payment alerts | §5.2 | `instant`: an extra `Urgency: high` push when a payment is first seen (usually in the mempool, seconds after it was sent), one per transaction, at most 2 a minute per account; `private`: up to 4 events inside the scheduled ping, same 1024-byte size. Backfilled payments don't push |
 | Replay protection | §3.4 | `Date` within 60 s; `seq` windows per device, or per account for registration; `409 stale-seq` with `min_seq` |
 | Rate limits | §3.5 | Per account and per device, per minute; `429` with `Retry-After`, delivered inside OHTTP |
 | Chain follower | §6.1 | Follows Zaino or lightwalletd with `GetLatestBlock` and `GetBlockRange` only; checks the network; rolls back reorgs up to 100 blocks and starts over at the tip on deeper ones; keeps `tip` current and announces each block to the rest of the server |
@@ -24,7 +25,8 @@ to end against a fake chain source. Not yet run against a real Zaino.
 
 ## Not yet
 
-- **Mempool scanning** (`GetMempoolStream`): events start at `mined` for now.
+- **Dropped mempool transactions.** An event for a transaction that leaves
+  the mempool unmined stays `mempool` until acknowledged or 7 days old.
 - **Spend alerts.** Leases with `spend_alerts: true` get
   `501 spend-alerts-unavailable`.
 - **Locked memory.** Keys are zeroed where we hold them as text, but the

@@ -1,7 +1,8 @@
 //! Chain follower: tracks the best chain on a Zaino or lightwalletd server
 //! (the `CompactTxStreamer` gRPC API) and announces each block.
 //!
-//! - It reads blocks in bulk only, with `GetLatestBlock` and `GetBlockRange`.
+//! - It reads blocks in bulk only, with `GetLatestBlock` and `GetBlockRange`
+//!   (and, for [`crate::mempool`], `GetMempoolStream`).
 //!   It never asks for a transaction (invariant 7, spec §6.1).
 //! - It starts at the current tip; it keeps no history on disk. A scanner
 //!   that needs older blocks for a lease's `from_height` fetches them
@@ -24,7 +25,8 @@ use tokio::sync::broadcast;
 use tonic::transport::{Channel, ClientTlsConfig, Endpoint};
 use zcash_client_backend::proto::compact_formats::CompactBlock;
 use zcash_client_backend::proto::service::compact_tx_streamer_client::CompactTxStreamerClient;
-use zcash_client_backend::proto::service::{BlockId, BlockRange, ChainSpec, Empty};
+use zcash_client_backend::proto::service::{BlockId, BlockRange, ChainSpec, Empty, RawTransaction};
+use zcash_protocol::consensus::BranchId;
 
 /// Blocks remembered for reorg handling. zcashd and Zebra refuse reorgs
 /// deeper than 99 blocks.
@@ -147,6 +149,28 @@ impl Lightwalletd {
             });
         }
         Ok(())
+    }
+
+    /// The current consensus branch id, for parsing mempool transactions.
+    pub async fn consensus_branch_id(&self) -> Result<BranchId, ChainError> {
+        let info = self.client.clone().get_lightd_info(Empty {}).await?;
+        u32::from_str_radix(info.get_ref().consensus_branch_id.trim(), 16)
+            .ok()
+            .and_then(|id| BranchId::try_from(id).ok())
+            .ok_or(ChainError::InvalidBlock("unknown consensus branch id"))
+    }
+
+    /// The whole mempool, then new transactions as they arrive. The server
+    /// ends the stream when a block is mined.
+    pub async fn mempool_stream(
+        &self,
+    ) -> Result<tonic::codec::Streaming<RawTransaction>, ChainError> {
+        Ok(self
+            .client
+            .clone()
+            .get_mempool_stream(Empty {})
+            .await?
+            .into_inner())
     }
 
     pub async fn latest_height(&self) -> Result<u64, ChainError> {

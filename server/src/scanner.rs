@@ -8,8 +8,12 @@
 //!   `lease: null` drops the lease and the account's events at once.
 //! - **Live scanning:** every block the chain follower connects is
 //!   trial-decrypted with every active lease's keys.
+//! - **Mempool:** [`crate::mempool`] checks each new mempool transaction
+//!   the same way, so payments appear as `mempool` events before they are
+//!   mined.
 //! - **Backfill:** a new lease (or a lease after a restart) is scanned from
-//!   its `from_height`, clamped to [`MAX_BACKFILL_BLOCKS`] below the tip.
+//!   its `from_height`, clamped to [`MAX_BACKFILL_BLOCKS`] below the tip,
+//!   and against the current mempool.
 //!   Payments found this way don't trigger instant pushes: the wallet just
 //!   woke and gets them from `wake` or the long-poll.
 //! - **Events** are per account, keyed by their deterministic id, and
@@ -28,7 +32,7 @@ use lz_proto::event_id::{Pool, event_id};
 use lz_proto::lease::{AlertMode, LeaseRequest};
 use prost::Message as _;
 use tokio::sync::{Semaphore, broadcast, watch};
-use zcash_client_backend::proto::compact_formats::{CompactBlock, CompactOrchardAction};
+use zcash_client_backend::proto::compact_formats::{CompactBlock, CompactOrchardAction, CompactTx};
 use zcash_note_encryption::EphemeralKeyBytes;
 use zcash_note_encryption::batch::try_compact_note_decryption;
 use zeroize::Zeroizing;
@@ -45,6 +49,10 @@ pub const MAX_BACKFILL_BLOCKS: u64 = 7 * 86_400 / 25;
 /// Confirmations after which an event stops changing. A placeholder until
 /// post-NU7 reorg behavior is known (spec §9).
 pub const FINALITY_DEPTH: u32 = 10;
+/// Most mempool data kept for checking new leases against, in encoded
+/// `CompactTx` bytes. A spam wave can't exhaust memory; past this, new
+/// transactions are still scanned live, just not kept.
+const MAX_MEMPOOL_BYTES: usize = 64 * 1024 * 1024;
 /// Backfills running at once, to spare the chain source.
 const MAX_CONCURRENT_BACKFILLS: usize = 4;
 use lz_proto::api::MAX_PING_EVENTS;
@@ -58,6 +66,12 @@ struct Lease {
     generation: u64,
     /// No backfill has been started yet (the tip was unknown at the start).
     needs_backfill: bool,
+}
+
+#[derive(Default)]
+struct MempoolSnapshot {
+    txs: HashMap<Vec<u8>, Arc<CompactTx>>,
+    bytes: usize,
 }
 
 struct Stored {
@@ -85,6 +99,9 @@ pub struct Scanner {
     /// Server secret for event ids (spec §4.4).
     secret: Zeroizing<[u8; 32]>,
     inner: Mutex<Inner>,
+    /// The current mempool in compact form, by txid. Public chain data, not
+    /// key-derived.
+    mempool: Mutex<MempoolSnapshot>,
     release: watch::Sender<u64>,
     backfills: Arc<Semaphore>,
 }
@@ -130,6 +147,7 @@ impl Scanner {
         Self {
             secret,
             inner: Mutex::new(Inner::default()),
+            mempool: Mutex::new(MempoolSnapshot::default()),
             release: watch::channel(0).0,
             backfills: Arc::new(Semaphore::new(MAX_CONCURRENT_BACKFILLS)),
         }
@@ -302,6 +320,8 @@ impl Scanner {
                     e.status = EventStatus::Mined;
                     e.height = Some(block.height);
                     e.confirmations = confirmations;
+                    // The block's copy has the transaction's real index.
+                    e.compact_tx = Some(URL_SAFE_NO_PAD.encode(tx.encode_to_vec()));
                     e.rev += 1;
                     acct.last_seq += 1;
                     s.seq = acct.last_seq;
@@ -330,6 +350,93 @@ impl Scanner {
             }
         }
         new
+    }
+
+    /// Records matches in a mempool transaction as `mempool` events. Returns
+    /// the new ones, for alerts. An event already known keeps its status,
+    /// except that a `reorged` one moves back to `mempool` (spec §4.3).
+    pub fn record_mempool(
+        &self,
+        tx: &CompactTx,
+        matches: &[Match],
+        now: SystemTime,
+    ) -> Vec<(AccountId, Event)> {
+        let Ok(txid) = <[u8; 32]>::try_from(&tx.txid[..]) else {
+            return vec![];
+        };
+        let mut new = Vec::new();
+        let mut inner = self.lock();
+        for m in matches {
+            if inner
+                .leases
+                .get(&m.account)
+                .is_none_or(|l| l.expires_at <= now)
+            {
+                continue;
+            }
+            let id = event_id(&self.secret[..], &m.account, &txid, m.pool, m.index);
+            let acct = inner.events.entry(m.account).or_default();
+            match acct.by_id.get_mut(&id) {
+                Some(s) if s.event.status == EventStatus::Reorged => {
+                    s.event.status = EventStatus::Mempool;
+                    s.event.rev += 1;
+                    acct.last_seq += 1;
+                    s.seq = acct.last_seq;
+                }
+                Some(_) => {}
+                None => {
+                    let event = Event {
+                        id: id.clone(),
+                        rev: 1,
+                        kind: EventKind::Received,
+                        status: EventStatus::Mempool,
+                        height: None,
+                        confirmations: 0,
+                        compact_tx: Some(URL_SAFE_NO_PAD.encode(tx.encode_to_vec())),
+                    };
+                    acct.last_seq += 1;
+                    new.push((m.account, event.clone()));
+                    acct.by_id.insert(
+                        id,
+                        Stored {
+                            event,
+                            seq: acct.last_seq,
+                            created: now,
+                        },
+                    );
+                }
+            }
+        }
+        new
+    }
+
+    /// Replaces the mempool snapshot (a new stream starts with the whole
+    /// mempool).
+    pub fn mempool_clear(&self) {
+        *self.mempool.lock().unwrap_or_else(|e| e.into_inner()) = MempoolSnapshot::default();
+    }
+
+    /// Adds a transaction to the mempool snapshot. Beyond
+    /// [`MAX_MEMPOOL_BYTES`], new ones are scanned live but not kept.
+    pub fn mempool_insert(&self, tx: Arc<CompactTx>) {
+        let size = tx.encoded_len();
+        let mut m = self.mempool.lock().unwrap_or_else(|e| e.into_inner());
+        if m.txs.contains_key(&tx.txid) || m.bytes + size > MAX_MEMPOOL_BYTES {
+            return;
+        }
+        m.bytes += size;
+        m.txs.insert(tx.txid.clone(), tx);
+    }
+
+    /// The current mempool snapshot.
+    pub fn mempool_snapshot(&self) -> Vec<Arc<CompactTx>> {
+        self.mempool
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .txs
+            .values()
+            .cloned()
+            .collect()
     }
 
     /// Updates confirmations after the tip moved to `tip`.
@@ -393,7 +500,7 @@ impl Scanner {
         for s in &pending {
             let mut event = s.event.clone();
             let mut size = json_len(&event) + 1;
-            if size > budget - 2 {
+            if size > budget.saturating_sub(2) {
                 event.compact_tx = None;
                 size = json_len(&event) + 1;
             }
@@ -511,6 +618,12 @@ fn rfc3339(t: SystemTime) -> String {
 /// Trial-decrypts every shielded output in `block` with each lease's keys.
 /// CPU-bound: call it from a blocking thread.
 pub fn trial_decrypt(block: &CompactBlock, leases: &[(AccountId, Arc<ScanKeys>)]) -> Vec<Match> {
+    trial_decrypt_txs(&block.vtx, leases)
+}
+
+/// [`trial_decrypt`] over a list of transactions; [`Match::tx`] indexes
+/// `txs`.
+pub fn trial_decrypt_txs(txs: &[CompactTx], leases: &[(AccountId, Arc<ScanKeys>)]) -> Vec<Match> {
     use orchard::note_encryption::{IronwoodDomain, OrchardDomain};
     use sapling::note_encryption::{CompactOutputDescription, SaplingDomain, Zip212Enforcement};
 
@@ -525,7 +638,7 @@ pub fn trial_decrypt(block: &CompactBlock, leases: &[(AccountId, Arc<ScanKeys>)]
     let mut orchard_out = Vec::new();
     let mut ironwood_at = Vec::new();
     let mut ironwood_out = Vec::new();
-    for (t, tx) in block.vtx.iter().enumerate() {
+    for (t, tx) in txs.iter().enumerate() {
         for (i, out) in tx.outputs.iter().enumerate() {
             if let Ok(desc) = CompactOutputDescription::try_from(out) {
                 // Every block the scanner sees is long past Canopy (ZIP 212).
@@ -628,11 +741,36 @@ pub async fn scan_block(state: &Arc<AppState>, block: Arc<CompactBlock>) {
     if !new.is_empty() {
         tracing::info!(height = block.height, matches = new.len(), "lease matches");
     }
+    alert(state, new);
+}
+
+/// Most instant payment pushes per account per minute. A burst of payments
+/// (or spam aimed at one address) still reaches the wallet through `wake`
+/// and the long-poll, but can't burn its push budget with Apple or Google.
+pub const PAYMENT_PUSHES_PER_MINUTE: u32 = 2;
+
+/// Sends instant alerts for newly found events: one push per transaction
+/// per account (a transaction paying several of the account's outputs
+/// yields several events), within [`PAYMENT_PUSHES_PER_MINUTE`].
+pub fn alert(state: &Arc<AppState>, new: Vec<(AccountId, Event)>) {
+    let mut seen = std::collections::HashSet::new();
     for (account, event) in new {
-        if state.scanner.alert_mode(account) == Some(AlertMode::Instant) {
-            let state = state.clone();
-            tokio::spawn(async move { crate::push::send_payment(&state, account, &event).await });
+        if state.scanner.alert_mode(account) != Some(AlertMode::Instant) {
+            continue;
         }
+        if !seen.insert((account, event.compact_tx.clone())) {
+            continue;
+        }
+        let key: String = account.iter().map(|b| format!("{b:02x}")).collect();
+        if state
+            .payment_push_limiter
+            .check(&key, SystemTime::now())
+            .is_err()
+        {
+            continue;
+        }
+        let state = state.clone();
+        tokio::spawn(async move { crate::push::send_payment(&state, account, &event).await });
     }
 }
 
@@ -689,6 +827,29 @@ pub async fn backfill(state: Arc<AppState>, bf: Backfill) {
             found_any |= !new.is_empty();
         }
         start = end + 1;
+    }
+    // Payments sent but not yet mined. No pushes here either.
+    let pending = state.scanner.mempool_snapshot();
+    if !pending.is_empty()
+        && state
+            .scanner
+            .is_current(bf.account, bf.generation, SystemTime::now())
+    {
+        let leases = vec![(bf.account, bf.keys.clone())];
+        let txs: Vec<CompactTx> = pending.iter().map(|t| (**t).clone()).collect();
+        let txs = Arc::new(txs);
+        let t = txs.clone();
+        let matches = tokio::task::spawn_blocking(move || trial_decrypt_txs(&t, &leases))
+            .await
+            .unwrap_or_default();
+        for m in matches {
+            let new = state.scanner.record_mempool(
+                &txs[m.tx],
+                &[Match { tx: 0, ..m }],
+                SystemTime::now(),
+            );
+            found_any |= !new.is_empty();
+        }
     }
     if found_any {
         state.scanner.release();

@@ -447,3 +447,30 @@ fn releases_wake_waiting_polls() {
     s.release();
     assert!(rx.has_changed().unwrap());
 }
+
+#[test]
+fn mempool_transactions_parse_to_compact_and_match() {
+    use zcash_protocol::consensus::BranchId;
+    let alice = Wallet::new(1);
+    let bob = Wallet::new(2);
+    let raw = common::wallet::full_tx(&alice, true, true);
+    let tx = lz_server::mempool::to_compact(&raw, BranchId::Nu6_3).unwrap();
+    assert_eq!(tx.txid.len(), 32);
+    assert!(!tx.outputs.is_empty() && !tx.ironwood_actions.is_empty());
+    let found = lz_server::scanner::trial_decrypt_txs(
+        std::slice::from_ref(&tx),
+        &[(A, Arc::new(keys(&alice)))],
+    );
+    let mut pools: Vec<u8> = found.iter().map(|m| m.pool.code()).collect();
+    pools.sort();
+    assert_eq!(pools, [0, 2], "one hit each in Sapling and Ironwood");
+    assert!(
+        lz_server::scanner::trial_decrypt_txs(
+            std::slice::from_ref(&tx),
+            &[(B, Arc::new(keys(&bob)))]
+        )
+        .is_empty()
+    );
+    assert!(lz_server::mempool::to_compact(&raw[..raw.len() - 1], BranchId::Nu6_3).is_none());
+    assert!(lz_server::mempool::to_compact(b"junk", BranchId::Nu6_3).is_none());
+}

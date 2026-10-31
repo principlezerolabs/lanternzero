@@ -19,6 +19,7 @@ pub mod config;
 pub mod gateway;
 pub mod keys;
 pub mod limits;
+pub mod mempool;
 pub mod push;
 pub mod scanner;
 pub mod ssrf;
@@ -49,6 +50,8 @@ pub struct AppState {
     pub account_limiter: limits::RateLimiter,
     pub device_limiter: limits::RateLimiter,
     pub push_backoff: limits::PushBackoff,
+    /// Instant payment pushes per account (spec §5.2).
+    pub payment_push_limiter: limits::RateLimiter,
 }
 
 impl std::fmt::Debug for AppState {
@@ -112,6 +115,7 @@ impl AppState {
             account_limiter,
             device_limiter,
             push_backoff: limits::PushBackoff::default(),
+            payment_push_limiter: limits::RateLimiter::new(scanner::PAYMENT_PUSHES_PER_MINUTE),
         }))
     }
 }

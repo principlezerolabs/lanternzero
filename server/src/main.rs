@@ -9,7 +9,7 @@ use std::time::Duration;
 use lz_proto::token::AccountToken;
 use lz_server::config::Config;
 use lz_server::store::Store;
-use lz_server::{AppState, chain, gateway, push, scanner};
+use lz_server::{AppState, chain, gateway, mempool, push, scanner};
 
 #[tokio::main]
 async fn main() -> ExitCode {
@@ -63,6 +63,7 @@ async fn serve(config: Config) -> ExitCode {
                 Duration::from_secs(c.poll_secs),
             ));
             tokio::spawn(scanner::run(state.clone()));
+            tokio::spawn(mempool::run(state.clone()));
         }
         _ => tracing::warn!("no [chain] configured: tip stays 0 and nothing is scanned"),
     }

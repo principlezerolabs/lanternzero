@@ -1085,3 +1085,137 @@ async fn viewing_keys_never_reach_disk_or_logs() {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// Mempool scanning.
+
+#[tokio::test]
+async fn mempool_payment_alerts_at_once_then_mines_without_a_second_push() {
+    use zcash_protocol::consensus::BranchId;
+    let alice = Wallet::new(1);
+    let mut s = scanning(10).await;
+    s.wake(&[], lease_json(&alice, 10, "instant")).await;
+
+    let raw = common::wallet::full_tx(&alice, false, true);
+    let tx = lz_server::mempool::to_compact(&raw, BranchId::Nu6_3).unwrap();
+    lz_server::mempool::scan_tx(&s.h.state, tx.clone()).await;
+    let r = s.wake(&[], lease_json(&alice, 10, "instant")).await;
+    let e = &r.json["events"][0];
+    assert_eq!(
+        (e["status"].as_str(), e["height"].as_u64()),
+        (Some("mempool"), None)
+    );
+    assert!(e["compact_tx"].is_string());
+    assert_eq!(r.json["hints"], json!([]), "no hint before it is mined");
+    let id = e["id"].as_str().unwrap().to_owned();
+    eventually(|| !s.pushes.0.lock().unwrap().is_empty()).await;
+    assert_eq!(s.pushes.0.lock().unwrap().len(), 1);
+
+    // Seeing it again in the mempool changes nothing.
+    lz_server::mempool::scan_tx(&s.h.state, tx.clone()).await;
+    // Mined: same id, now `mined` with a hint, and no second push.
+    let mut mined = tx.clone();
+    mined.index = 3;
+    lz_server::scanner::scan_block(&s.h.state, Arc::new(block(11, vec![mined]))).await;
+    let r = s.wake(&[], lease_json(&alice, 10, "instant")).await;
+    let events = r.json["events"].as_array().unwrap();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0]["id"], id.as_str());
+    assert_eq!(events[0]["status"], "mined");
+    assert_eq!(events[0]["rev"], 2);
+    assert_eq!(r.json["hints"], json!([{ "start": 11, "end": 12 }]));
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(
+        s.pushes.0.lock().unwrap().len(),
+        1,
+        "only the first sighting pushes"
+    );
+
+    // A reorg sends it back to `mined` → `reorged`; the mempool brings it
+    // back to `mempool`.
+    s.h.state.scanner.on_disconnect(11);
+    lz_server::mempool::scan_tx(&s.h.state, tx).await;
+    let r = s.wake(&[], lease_json(&alice, 10, "instant")).await;
+    assert_eq!(r.json["events"][0]["status"], "mempool");
+}
+
+#[tokio::test]
+async fn mempool_stream_is_followed_and_new_leases_see_what_is_pending() {
+    let alice = Wallet::new(1);
+    let bob = Wallet::new(2);
+    let mut s = scanning(10).await;
+    s.chain.lock().unwrap().mempool = vec![
+        common::wallet::full_tx(&bob, true, false),
+        common::wallet::full_tx(&alice, true, false),
+    ];
+    // The stream runs before any lease exists, so nothing matches yet...
+    tokio::spawn(lz_server::mempool::run(s.h.state.clone()));
+    eventually(|| s.h.state.scanner.mempool_snapshot().len() == 2).await;
+    assert_eq!(s.page_len(), 0);
+    // ...but a new lease is checked against the pending transactions.
+    s.wake(&[], lease_json(&alice, 10, "instant")).await;
+    eventually(|| s.page_len() == 1).await;
+    let r = s.wake(&[], lease_json(&alice, 10, "instant")).await;
+    assert_eq!(r.json["events"][0]["status"], "mempool");
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(
+        s.pushes.0.lock().unwrap().is_empty(),
+        "catch-up matches don't push"
+    );
+}
+
+#[tokio::test]
+async fn one_push_per_transaction_and_at_most_two_a_minute() {
+    use zcash_protocol::consensus::BranchId;
+    let alice = Wallet::new(1);
+    let mut s = scanning(10).await;
+    s.wake(&[], lease_json(&alice, 10, "instant")).await;
+
+    // One transaction paying two of Alice's outputs: two events, one push.
+    let two = tx(
+        0xF1,
+        vec![
+            sapling_output(&alice.sapling, 1),
+            sapling_output(&alice.sapling, 2),
+        ],
+        vec![],
+        vec![],
+    );
+    lz_server::scanner::scan_block(&s.h.state, Arc::new(block(11, vec![two]))).await;
+    assert_eq!(s.page_len(), 2);
+    eventually(|| s.pushes.0.lock().unwrap().len() == 1).await;
+
+    // Three more payments in the same minute: only one more push, but all
+    // of them reach the wallet.
+    for i in 0..3u8 {
+        let raw = common::wallet::full_tx(&alice, true, false);
+        let mut t = lz_server::mempool::to_compact(&raw, BranchId::Nu6_3).unwrap();
+        t.txid = vec![0xF2 + i; 32];
+        lz_server::mempool::scan_tx(&s.h.state, t).await;
+    }
+    assert_eq!(s.page_len(), 5);
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(s.pushes.0.lock().unwrap().len(), 2);
+
+    // The mempool snapshot keeps one copy per txid.
+    let raw = common::wallet::full_tx(&alice, true, false);
+    let t = lz_server::mempool::to_compact(&raw, BranchId::Nu6_3).unwrap();
+    let before = s.h.state.scanner.mempool_snapshot().len();
+    lz_server::mempool::scan_tx(&s.h.state, t.clone()).await;
+    lz_server::mempool::scan_tx(&s.h.state, t).await;
+    assert_eq!(s.h.state.scanner.mempool_snapshot().len(), before + 1);
+}
+
+#[tokio::test]
+async fn an_unknown_branch_id_does_not_stop_mempool_scanning() {
+    let alice = Wallet::new(1);
+    let mut s = scanning(10).await;
+    {
+        let mut c = s.chain.lock().unwrap();
+        c.branch_id = Some("not-hex".into());
+        c.mempool = vec![common::wallet::full_tx(&alice, false, true)];
+    }
+    s.wake(&[], lease_json(&alice, 10, "instant")).await;
+    tokio::spawn(lz_server::mempool::run(s.h.state.clone()));
+    eventually(|| s.page_len() == 1).await;
+}

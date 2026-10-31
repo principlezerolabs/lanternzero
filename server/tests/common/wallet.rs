@@ -147,3 +147,95 @@ pub fn block(height: u64, vtx: Vec<CompactTx>) -> CompactBlock {
         ..CompactBlock::default()
     }
 }
+
+/// A real v6 transaction (NU6.3 rules) paying `to` once in each pool asked
+/// for. Proofs and signatures are dummies: it parses, but would never
+/// verify. Returns the serialized transaction.
+///
+/// There's no Orchard option: since NU6.3 the Orchard pool takes only a
+/// wallet's change to itself (cross-address transfers are disabled), so new
+/// payments land in Sapling or Ironwood. Orchard and Ironwood actions are
+/// parsed by the same code.
+pub fn full_tx(to: &Wallet, sapling_out: bool, ironwood_out: bool) -> Vec<u8> {
+    use orchard::builder::{Builder as OBuilder, BundleType as OBundleType};
+    use orchard::bundle::{Authorized as OAuthorized, BundleVersion};
+    use orchard::primitives::redpallas;
+    use rand010::SeedableRng;
+    use zcash_primitives::transaction::TransactionData;
+    use zcash_protocol::consensus::{BlockHeight, BranchId};
+    use zcash_protocol::value::ZatBalance;
+
+    let mut rng = rand010::rngs::StdRng::seed_from_u64(7);
+
+    let orchard_bundle = |version: BundleVersion, rng: &mut rand010::rngs::StdRng| {
+        let mut b = OBuilder::new(
+            OBundleType::DEFAULT,
+            version,
+            version.default_flags(),
+            orchard::Anchor::empty_tree(),
+        )
+        .unwrap();
+        b.add_output(None, to.orchard, NoteValue::from_raw(5_000), [0; 512])
+            .unwrap();
+        let (bundle, _) = b.build::<ZatBalance>(&mut *rng).unwrap().unwrap();
+        // Parsers check that the proof has its canonical size.
+        let proof_len = orchard::Proof::expected_proof_size(bundle.actions().len());
+        bundle.map_authorization(
+            &mut (),
+            |_, _, _| redpallas::Signature::<redpallas::SpendAuth>::from([0u8; 64]),
+            |_, _| {
+                OAuthorized::from_parts(
+                    orchard::Proof::new(vec![0; proof_len]),
+                    redpallas::Signature::<redpallas::Binding>::from([0u8; 64]),
+                )
+            },
+        )
+    };
+    let orchard = None;
+    let ironwood = ironwood_out.then(|| orchard_bundle(BundleVersion::ironwood_v3(), &mut rng));
+
+    let sapling = sapling_out.then(|| {
+        use sapling::builder::{Builder as SBuilder, BundleType as SBundleType};
+        use sapling::prover::mock::{MockOutputProver, MockSpendProver};
+        let mut b = SBuilder::new(
+            sapling::note_encryption::Zip212Enforcement::On,
+            SBundleType::DEFAULT,
+            sapling::Anchor::empty_tree(),
+        );
+        b.add_output(
+            None,
+            to.sapling,
+            sapling::value::NoteValue::from_raw(7_000),
+            [0; 512],
+        )
+        .unwrap();
+        let (bundle, _) = b
+            .build::<MockSpendProver, MockOutputProver, _, ZatBalance>(&[], &mut rng)
+            .unwrap()
+            .unwrap();
+        bundle.map_authorization(
+            (),
+            |_, _| [0u8; 192],
+            |_, _| [0u8; 192],
+            |_, _| redjubjub::Signature::<redjubjub::SpendAuth>::from([0u8; 64]),
+            |_, _| sapling::bundle::Authorized {
+                binding_sig: redjubjub::Signature::<redjubjub::Binding>::from([0u8; 64]),
+            },
+        )
+    });
+
+    let tx = TransactionData::<zcash_primitives::transaction::Authorized>::from_parts_v6(
+        BranchId::Nu6_3,
+        0,
+        BlockHeight::from_u32(3_600_000),
+        None,
+        sapling,
+        orchard,
+        ironwood,
+    )
+    .freeze()
+    .unwrap();
+    let mut out = Vec::new();
+    tx.write(&mut out).unwrap();
+    out
+}

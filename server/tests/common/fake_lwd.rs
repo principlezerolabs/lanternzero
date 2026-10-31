@@ -11,7 +11,9 @@ use tonic::server::{Grpc, NamedService, ServerStreamingService, UnaryService};
 use tonic::{Request, Response, Status};
 use tonic_prost::ProstCodec;
 use zcash_client_backend::proto::compact_formats::CompactBlock;
-use zcash_client_backend::proto::service::{BlockId, BlockRange, ChainSpec, Empty, LightdInfo};
+use zcash_client_backend::proto::service::{
+    BlockId, BlockRange, ChainSpec, Empty, LightdInfo, RawTransaction,
+};
 
 type BoxFuture<T> = Pin<Box<dyn Future<Output = T> + Send>>;
 
@@ -24,6 +26,10 @@ pub struct FakeChain {
     /// Report a higher tip than the blocks we serve.
     pub tip_lead: u64,
     pub range_calls: Vec<(u64, u64)>,
+    /// Raw transactions `GetMempoolStream` sends before ending the stream.
+    pub mempool: Vec<Vec<u8>>,
+    /// Overrides the reported consensus branch id (hex).
+    pub branch_id: Option<String>,
 }
 
 impl FakeChain {
@@ -83,13 +89,47 @@ impl UnaryService<Empty> for Info {
     type Response = LightdInfo;
     type Future = BoxFuture<Result<Response<LightdInfo>, Status>>;
     fn call(&mut self, _: Request<Empty>) -> Self::Future {
-        let chain_name = self.0.0.lock().unwrap().chain_name.clone();
+        let (chain_name, branch_id) = {
+            let c = self.0.0.lock().unwrap();
+            (c.chain_name.clone(), c.branch_id.clone())
+        };
         Box::pin(async move {
             Ok(Response::new(LightdInfo {
                 chain_name,
+                // NU6.3, as lightwalletd reports it (hex).
+                consensus_branch_id: branch_id.unwrap_or_else(|| {
+                    format!(
+                        "{:08x}",
+                        u32::from(zcash_protocol::consensus::BranchId::Nu6_3)
+                    )
+                }),
                 ..LightdInfo::default()
             }))
         })
+    }
+}
+
+struct Mempool(Fake);
+impl ServerStreamingService<Empty> for Mempool {
+    type Response = RawTransaction;
+    type ResponseStream = tokio_stream::Iter<std::vec::IntoIter<Result<RawTransaction, Status>>>;
+    type Future = BoxFuture<Result<Response<Self::ResponseStream>, Status>>;
+    fn call(&mut self, _: Request<Empty>) -> Self::Future {
+        let txs: Vec<_> = self
+            .0
+            .0
+            .lock()
+            .unwrap()
+            .mempool
+            .iter()
+            .map(|data| {
+                Ok(RawTransaction {
+                    data: data.clone(),
+                    height: 0,
+                })
+            })
+            .collect();
+        Box::pin(async move { Ok(Response::new(tokio_stream::iter(txs))) })
     }
 }
 
@@ -139,6 +179,7 @@ impl tower::Service<http::Request<Body>> for Fake {
                 "GetLatestBlock" => grpc().unary(Latest(me), req).await,
                 "GetLightdInfo" => grpc().unary(Info(me), req).await,
                 "GetBlockRange" => grpc().server_streaming(Range(me), req).await,
+                "GetMempoolStream" => grpc().server_streaming(Mempool(me), req).await,
                 _ => Status::unimplemented("not faked").into_http(),
             })
         })
