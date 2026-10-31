@@ -14,6 +14,19 @@ updates:
     schedule:
       interval: weekly
     open-pull-requests-limit: 5
+    # lz-proto is compiled into wallet SDKs next to librustzcash. Its shared
+    # crates move only when librustzcash moves (CONTRIBUTING.md), so no
+    # major-bump PRs for them. Patches still come; advisories fail
+    # `cargo deny` in CI regardless.
+    ignore:
+      - dependency-name: base64
+        update-types: ["version-update:semver-major"]
+      - dependency-name: getrandom
+        update-types: ["version-update:semver-major"]
+      - dependency-name: hmac
+        update-types: ["version-update:semver-major"]
+      - dependency-name: sha2
+        update-types: ["version-update:semver-major"]
     groups:
       # Minor and patch updates in one weekly PR; majors stay separate.
       cargo-minor:

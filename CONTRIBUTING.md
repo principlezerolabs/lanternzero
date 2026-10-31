@@ -113,6 +113,11 @@ one:
 - **Maintained.** Prefer widely used crates with recent releases. For
   cryptography, use crates from RustCrypto or the Zcash ecosystem; don't
   write your own.
+- **Match librustzcash.** In client-side crates, use the same major
+  versions of shared crates (`sha2`, `hmac`, `base64`, `getrandom`, and so
+  on) as the librustzcash release wallets ship. A newer one puts a second
+  copy into every wallet app. Bump them when librustzcash does, or sooner
+  only for a security fix.
 - **Allowed.** `cargo deny check` must pass. [`deny.toml`](deny.toml) lists
   the allowed licenses and banned crates.
 
