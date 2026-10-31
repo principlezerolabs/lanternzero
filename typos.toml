@@ -1,3 +1,6 @@
-# Web Push RFC 8291 test vector (base64url) in server/src/webpush.rs.
+# Fixtures in server/src/webpush.rs (RFC 8291 vector, RFC 7519 JWT header).
 [default]
-extend-ignore-re = ["SRpkNtoIAiw4"]
+extend-ignore-re = [
+  "SRpkNtoIAiw4",
+  '"typ":"JWT"',
+]
