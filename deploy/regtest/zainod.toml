@@ -1,0 +1,15 @@
+# Zaino in front of the regtest Zebra, for tests.
+backend = 'fetch'
+network = 'Regtest'
+ephemeral_finalised_state = true
+
+[grpc_settings]
+# The no-tls image; reachable only on the Docker network and host loopback.
+listen_address = '0.0.0.0:8137'
+
+[validator_settings]
+validator_jsonrpc_listen_address = 'zebra:18232'
+
+[storage.database]
+path = '/zaino-data'
+size = 4

@@ -1,0 +1,46 @@
+# A private regtest chain (Zebra + Zaino) for the server's integration tests.
+#   docker compose -f deploy/regtest/compose.yaml up -d --wait
+#   cargo test -p lz-server --test regtest -- --ignored --test-threads 1
+#   docker compose -f deploy/regtest/compose.yaml down
+# Images are pinned by digest. Zaino publishes amd64 only; on Apple silicon
+# it runs under emulation.
+name: lz-regtest
+
+services:
+  zebra:
+    # zfnd/zebra:7.0.0
+    image: zfnd/zebra@sha256:a70d2be8ffef3a4b6e37355724e36a0e6c1838e46baa28bfb216739f00cf2d34
+    volumes:
+      - ./zebrad.toml:/home/zebra/.config/zebrad.toml:ro
+    ports:
+      - "127.0.0.1:18232:18232"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf -H 'content-type: application/json' -d '{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"getblockchaininfo\",\"params\":[]}' http://127.0.0.1:18232"]
+      interval: 2s
+      retries: 30
+
+  # Zaino wants a non-empty chain at startup: mine the first blocks.
+  seed:
+    image: zfnd/zebra@sha256:a70d2be8ffef3a4b6e37355724e36a0e6c1838e46baa28bfb216739f00cf2d34
+    entrypoint: ["sh", "-c"]
+    command:
+      - >-
+        curl -sf -H 'content-type: application/json'
+        -d '{"jsonrpc":"2.0","id":1,"method":"generate","params":[5]}'
+        http://zebra:18232
+    depends_on:
+      zebra:
+        condition: service_healthy
+
+  zaino:
+    # zingodevops/zainod:0.10.1-no-tls
+    image: zingodevops/zainod@sha256:c8428a39d510fd59a9182a5e19cf473d6af6a4b6a672aff8b1a690e9c23c17b9
+    platform: linux/amd64
+    command: ["start", "--config", "/etc/zaino/zainod.toml"]
+    volumes:
+      - ./zainod.toml:/etc/zaino/zainod.toml:ro
+    ports:
+      - "127.0.0.1:8137:8137"
+    depends_on:
+      seed:
+        condition: service_completed_successfully

@@ -25,7 +25,9 @@ use tokio::sync::broadcast;
 use tonic::transport::{Channel, ClientTlsConfig, Endpoint};
 use zcash_client_backend::proto::compact_formats::CompactBlock;
 use zcash_client_backend::proto::service::compact_tx_streamer_client::CompactTxStreamerClient;
-use zcash_client_backend::proto::service::{BlockId, BlockRange, ChainSpec, Empty, RawTransaction};
+use zcash_client_backend::proto::service::{
+    BlockId, BlockRange, ChainSpec, Empty, LightdInfo, RawTransaction,
+};
 use zcash_protocol::consensus::BranchId;
 
 /// Blocks remembered for reorg handling. zcashd and Zebra refuse reorgs
@@ -133,19 +135,31 @@ impl Lightwalletd {
         Ok(Self { client })
     }
 
+    /// The server's `GetLightdInfo` answer.
+    pub async fn info(&self) -> Result<LightdInfo, ChainError> {
+        Ok(self
+            .client
+            .clone()
+            .get_lightd_info(Empty {})
+            .await?
+            .into_inner())
+    }
+
     /// Fails unless the server follows `network`.
+    ///
+    /// `chain_name` alone can't tell testnet from regtest: Zaino (like
+    /// lightwalletd before it) reports `"test"` for both. Sapling's
+    /// activation height can, because it's fixed on the public networks.
     pub async fn check_network(&self, network: Network) -> Result<(), ChainError> {
-        let info = self.client.clone().get_lightd_info(Empty {}).await?;
-        let expected = match network {
-            Network::Main => "main",
-            Network::Test => "test",
-            Network::Regtest => "regtest",
-        };
-        let found = &info.get_ref().chain_name;
-        if found != expected {
+        let info = self.info().await?;
+        let found = network_of(&info.chain_name, info.sapling_activation_height);
+        if found != Some(network) {
             return Err(ChainError::WrongNetwork {
-                expected: expected.into(),
-                found: found.clone(),
+                expected: format!("{network:?}"),
+                found: format!(
+                    "{:?} (sapling activation {})",
+                    info.chain_name, info.sapling_activation_height
+                ),
             });
         }
         Ok(())
@@ -213,6 +227,22 @@ impl Lightwalletd {
             expected += 1;
         }
         Ok(blocks)
+    }
+}
+
+/// Sapling activation heights of the public networks.
+const MAINNET_SAPLING: u64 = 419_200;
+const TESTNET_SAPLING: u64 = 280_000;
+
+/// Which network a `GetLightdInfo` answer describes.
+pub fn network_of(chain_name: &str, sapling_activation: u64) -> Option<Network> {
+    match chain_name {
+        "main" if sapling_activation == MAINNET_SAPLING => Some(Network::Main),
+        "test" if sapling_activation == TESTNET_SAPLING => Some(Network::Test),
+        // zcashd-style servers say "regtest"; Zaino and lightwalletd say
+        // "test" with regtest's own activation heights.
+        "regtest" | "test" => Some(Network::Regtest),
+        _ => None,
     }
 }
 

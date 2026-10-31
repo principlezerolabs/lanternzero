@@ -155,6 +155,20 @@ async fn refuses_the_wrong_network() {
         h.source.check_network(Network::Main).await,
         Err(ChainError::WrongNetwork { .. })
     ));
+    assert!(h.source.check_network(Network::Test).await.is_ok());
+    assert!(h.source.check_network(Network::Regtest).await.is_err());
+}
+
+#[test]
+fn tells_testnet_from_regtest_by_sapling_activation() {
+    use lz_server::chain::network_of;
+    assert_eq!(network_of("main", 419_200), Some(Network::Main));
+    assert_eq!(network_of("main", 1), None);
+    assert_eq!(network_of("test", 280_000), Some(Network::Test));
+    // What Zaino 0.10 reports for a Zebra regtest node.
+    assert_eq!(network_of("test", 1), Some(Network::Regtest));
+    assert_eq!(network_of("regtest", 1), Some(Network::Regtest));
+    assert_eq!(network_of("other", 1), None);
 }
 
 #[tokio::test]

@@ -95,6 +95,11 @@ impl UnaryService<Empty> for Info {
         };
         Box::pin(async move {
             Ok(Response::new(LightdInfo {
+                sapling_activation_height: match chain_name.as_str() {
+                    "main" => 419_200,
+                    "test" => 280_000,
+                    _ => 1,
+                },
                 chain_name,
                 // NU6.3, as lightwalletd reports it (hex).
                 consensus_branch_id: branch_id.unwrap_or_else(|| {

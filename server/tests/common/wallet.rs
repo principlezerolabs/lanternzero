@@ -48,6 +48,18 @@ impl Wallet {
         .encode(&network)
     }
 
+    /// A Unified Address with only this wallet's Sapling receiver.
+    pub fn sapling_ua(&self, network: NetworkType) -> String {
+        unified::Address::try_from_items(
+            unified::Revision::R0,
+            vec![unified::Uitem::Data(unified::Receiver::Sapling(
+                self.sapling.to_bytes(),
+            ))],
+        )
+        .unwrap()
+        .encode(&network)
+    }
+
     pub fn uivk_main(&self) -> String {
         self.uivk(NetworkType::Main, unified::Revision::R0)
     }

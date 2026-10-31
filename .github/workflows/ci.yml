@@ -38,6 +38,22 @@ jobs:
       - if: matrix.toolchain == 'stable'
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
+  # Integration tests against real Zebra and Zaino on a private regtest
+  # chain (deploy/regtest).
+  regtest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install stable --profile minimal
+      - run: docker compose -f deploy/regtest/compose.yaml up -d --wait
+      - run: cargo test -p lz-server --test regtest --locked -- --ignored --test-threads 1
+      - if: failure()
+        run: docker compose -f deploy/regtest/compose.yaml logs --tail 200
+      - if: always()
+        run: docker compose -f deploy/regtest/compose.yaml down
+
   privacy-guards:
     name: privacy guards
     runs-on: ubuntu-latest

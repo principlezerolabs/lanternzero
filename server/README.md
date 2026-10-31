@@ -4,7 +4,9 @@ The Lantern Zero server: scheduled wake-ups, the opt-in scanner with in-memory
 key leases, the hint list, and long-poll endpoints.
 
 **Status: prototype.** Default mode and incoming-payment scanning work end
-to end against a fake chain source. Not yet run against a real Zaino.
+to end against a fake chain source, and the chain follower and block
+scanning also against real Zebra and Zaino on regtest
+([`deploy/regtest`](../deploy/regtest/README.md)).
 
 ## What works
 
@@ -20,7 +22,7 @@ to end against a fake chain source. Not yet run against a real Zaino.
 | Payment alerts | §5.2 | `instant`: an extra `Urgency: high` push when a payment is first seen (usually in the mempool, seconds after it was sent), one per transaction, at most 2 a minute per account; `private`: up to 4 events inside the scheduled ping, same 1024-byte size. Backfilled payments don't push |
 | Replay protection | §3.4 | `Date` within 60 s; `seq` windows per device, or per account for registration; `409 stale-seq` with `min_seq` |
 | Rate limits | §3.5 | Per account and per device, per minute; `429` with `Retry-After`, delivered inside OHTTP |
-| Chain follower | §6.1 | Follows Zaino or lightwalletd with `GetLatestBlock` and `GetBlockRange` only; checks the network; rolls back reorgs up to 100 blocks and starts over at the tip on deeper ones; keeps `tip` current and announces each block to the rest of the server |
+| Chain follower | §6.1 | Follows Zaino or lightwalletd with `GetLatestBlock` and `GetBlockRange` only; checks the network (by `chain_name` and Sapling's activation height, since Zaino reports regtest as `"test"`); rolls back reorgs up to 100 blocks and starts over at the tip on deeper ones; keeps `tip` current and announces each block to the rest of the server |
 | Wake-up scheduler | §5.1, §5.3 | Every 30 min on the half hour, spread over 5 min; RFC 8291 encryption, VAPID, `TTL`/`Urgency`/`Topic`; drops devices on `404`/`410`; honors a gateway's `429` `Retry-After` (capped at 24 h) |
 
 ## Not yet

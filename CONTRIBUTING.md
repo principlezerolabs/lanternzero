@@ -132,4 +132,13 @@ cargo +1.89 test -p lz-server   # the server's minimum Rust
 cargo deny check
 ```
 
+If you change the chain follower, scanner, or mempool code, also run the
+regtest tests against real Zebra and Zaino (needs Docker; CI runs them too):
+
+```sh
+docker compose -f deploy/regtest/compose.yaml up -d --wait
+cargo test -p lz-server --test regtest -- --ignored --test-threads 1
+docker compose -f deploy/regtest/compose.yaml down
+```
+
 Keep pull requests focused, and fill in the checklist in the template.
