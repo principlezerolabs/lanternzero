@@ -526,3 +526,68 @@ async fn vapid_rotation_keeps_devices_on_their_key_until_they_move() {
         "devices bound to k2 dropped"
     );
 }
+
+#[tokio::test]
+async fn ohttp_key_rotation_through_the_client_core() {
+    let h = harness(true);
+    let dir = h.state.config.data_dir.clone();
+    let fetch = |h: &Harness| {
+        let h = h.fork();
+        async move { KeyConfig::from_two_relays(&h.key_config().await, &h.key_config().await) }
+    };
+    let old = fetch(&h).await.unwrap();
+    let mut c = Client::new(
+        connection(&h),
+        Network::Main,
+        Transport::Ohttp(old.clone()),
+        ClientState::default(),
+    )
+    .unwrap();
+    let p = c.info(now_ms()).unwrap();
+    let r = relay(&h, p.request()).await;
+    c.finish_info(p, reply(&r)).unwrap();
+    let device = PushReceiver::generate().unwrap();
+    let endpoint = "https://push.example-wallet.app/wp/rotation";
+    let p = c.register(now_ms(), endpoint, device.push_keys()).unwrap();
+    let r = relay(&h, p.request()).await;
+    c.finish_register(p, reply(&r)).unwrap();
+
+    // Rotate; the running server picks it up (spec §3.2). Only the new
+    // configuration is served, but a wallet that cached the old one keeps
+    // working, and `info` tells it to move.
+    assert_eq!(lz_server::rotate_ohttp(&dir, false).unwrap(), 2);
+    let now_secs = now_ms() / 1000;
+    assert_eq!(h.state.ohttp.reload(&dir, now_secs).unwrap(), Some(2));
+    let new = fetch(&h).await.unwrap();
+    assert_ne!(new.sha256_hex(), old.sha256_hex());
+    let p = c.wake(now_ms(), None).unwrap();
+    let r = relay(&h, p.request()).await;
+    c.finish_wake(p, reply(&r)).unwrap();
+    let p = c.info(now_ms()).unwrap();
+    let r = relay(&h, p.request()).await;
+    assert_eq!(
+        c.finish_info(p, reply(&r)).unwrap_err(),
+        Error::KeyConfigChanged
+    );
+    c.set_key_config(new.clone());
+    let p = c.info(now_ms()).unwrap();
+    let r = relay(&h, p.request()).await;
+    c.finish_info(p, reply(&r)).unwrap();
+
+    // A suspected leak, here picked up by a restart: old keys are dropped
+    // at once. A wallet still on one gets the RFC 9458 `ohttp-key` problem, fetches the configuration
+    // again, and carries on.
+    assert_eq!(lz_server::rotate_ohttp(&dir, true).unwrap(), 3);
+    let h = h.restart();
+    let p = c.wake(now_ms(), None).unwrap();
+    let r = relay(&h, p.request()).await;
+    assert_eq!(r.0, 400);
+    assert_eq!(
+        c.finish_wake(p, reply(&r)).unwrap_err(),
+        Error::KeyConfigRejected
+    );
+    c.set_key_config(fetch(&h).await.unwrap());
+    let p = c.wake(now_ms(), None).unwrap();
+    let r = relay(&h, p.request()).await;
+    c.finish_wake(p, reply(&r)).unwrap();
+}

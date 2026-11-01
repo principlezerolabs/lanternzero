@@ -5,7 +5,7 @@ bridge until Zcash's Tachyon upgrade changes how wallets find payments. Read
 `README.md` first for the user-facing description.
 
 **Status (2026-11-01): pre-alpha, phase 1 of 4: spec and prototype.** The
-draft protocol spec is `spec/v0.md` (rev 3.12); `crates/lz-proto` holds the
+draft protocol spec is `spec/v0.md` (rev 3.13); `crates/lz-proto` holds the
 shared protocol types; `server/` is a prototype (OHTTP gateway, devices,
 30-minute pings, chain follower, and the scanner with in-memory leases,
 events, hints, and long-poll); `gateway/`, `client/core`, and the

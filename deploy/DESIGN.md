@@ -32,7 +32,7 @@ The Compose kit in this folder is the only installer. The server binary gets
 two more subcommands next to `new-account`:
 
 - **`lz-server init`** writes `config.toml` and the data directory
-  (`0700`). It generates the server's own keys (OHTTP seed, VAPID key, event-id
+  (`0700`). It generates the server's own keys (OHTTP key, VAPID key, event-id
   secret),
   reads the onion hostname from the Tor container, and prints the
   connection URL once, the same way `new-account` does. It writes no

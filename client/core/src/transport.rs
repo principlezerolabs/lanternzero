@@ -259,6 +259,23 @@ pub(crate) fn build(
     }
 }
 
+/// RFC 9458 §5.3's problem type for a key configuration the gateway
+/// doesn't accept.
+const OHTTP_KEY_PROBLEM_TYPE: &str = "https://iana.org/assignments/http-problem-types#ohttp-key";
+
+/// Whether an unencapsulated error body is the `ohttp-key` problem.
+fn is_ohttp_key_problem(body: &[u8]) -> bool {
+    #[derive(serde::Deserialize)]
+    struct Problem<'a> {
+        #[serde(rename = "type", borrow)]
+        kind: Option<std::borrow::Cow<'a, str>>,
+    }
+    serde_json::from_slice::<Problem<'_>>(body)
+        .ok()
+        .and_then(|p| p.kind)
+        .is_some_and(|t| t == OHTTP_KEY_PROBLEM_TYPE)
+}
+
 /// Opens a response with the matching [`Opener`].
 pub(crate) fn open(opener: Opener, resp: HttpResponse<'_>) -> Result<Inner, Error> {
     match opener {
@@ -269,7 +286,11 @@ pub(crate) fn open(opener: Opener, resp: HttpResponse<'_>) -> Result<Inner, Erro
         }),
         Opener::Ohttp(ctx) => {
             if resp.status != 200 {
-                return Err(Error::Relay(resp.status));
+                return Err(if resp.status == 400 && is_ohttp_key_problem(resp.body) {
+                    Error::KeyConfigRejected
+                } else {
+                    Error::Relay(resp.status)
+                });
             }
             let plain = Zeroizing::new(ctx.decapsulate(resp.body).map_err(|_| Error::Transport)?);
             // Invariant 4: a server must pad every response the same.
@@ -297,6 +318,26 @@ pub(crate) fn open(opener: Opener, resp: HttpResponse<'_>) -> Result<Inner, Erro
                 retry_after,
                 body: Zeroizing::new(msg.content().to_vec()),
             })
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn recognizes_only_the_ohttp_key_problem() {
+        let key =
+            br#"{"type":"https://iana.org/assignments/http-problem-types#ohttp-key","status":400}"#;
+        assert!(is_ohttp_key_problem(key));
+        for other in [
+            &br#"{"type":"https://lanternzero.com/problems/bad-size"}"#[..],
+            br#"{"title":"no type"}"#,
+            b"",
+            b"<html>Bad Request</html>",
+        ] {
+            assert!(!is_ohttp_key_problem(other));
         }
     }
 }

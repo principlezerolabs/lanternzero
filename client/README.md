@@ -26,7 +26,7 @@ builds on Rust 1.89, librustzcash's own minimum.
 | Spec | |
 | --- | --- |
 | §3.1–3.3 | OHTTP encapsulation of Binary HTTP padded to 4096 bytes; responses that aren't exactly 4096 bytes are refused. `.onion` servers over Tor instead (`Transport::Onion`) |
-| §3.2 | `KeyConfig::from_two_relays`: refuses configurations that differ between relays; `info` must name the same one |
+| §3.2 | `KeyConfig::from_two_relays`: refuses configurations that differ between relays; `info` must name the same one (`Error::KeyConfigChanged`). After a rotation, `Error::KeyConfigRejected` (RFC 9458's `ohttp-key` problem) means fetch the configuration again, `set_key_config`, and build the request again; do the same after an `Error::Relay` if the configuration is more than an hour old |
 | §3.4 | `Date` header and time-based `seq`, with `stale-seq` recovery: on `Error::StaleSeq`, build the request again and send it once more |
 | §4.1 | Device registration and removal. Registration names the VAPID key `info` last reported (call `info` first); `Error::UnknownVapidKey` means read `info` again and resubscribe. When `info` reports a new key, register a subscription bound to it, then delete the old record with `unregister_device`. `Error::UnknownDevice` clears the device so the app registers again |
 | §4.2 | `wake`, with or without a lease. Leases are checked first: no full viewing key without spend alerts |

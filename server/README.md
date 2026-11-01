@@ -39,7 +39,6 @@ scanning also against real Zebra and Zaino on regtest
   zero themselves on drop. Locked memory and no core dumps (below) keep
   them off disk meanwhile.
 - **Webhooks** (§4.5).
-- **OHTTP key rotation.** The OHTTP key configuration doesn't rotate yet.
 - **More `doctor` checks** (deploy/DESIGN.md). `doctor` doesn't yet check
   that the onion service or OHTTP gateway answers from outside, or the
   clock beyond what the tip's age shows.
@@ -69,6 +68,27 @@ it waits for Tor to write the onion address. The Compose kit in
 [`deploy/`](../deploy/README.md) runs it for you; `init` with no options
 prints them all.
 
+### Rotating the OHTTP key
+
+```sh
+lz-server <config.toml> rotate-ohttp              # routine: at least every 90 days
+lz-server <config.toml> rotate-ohttp --drop-old   # suspected leak
+```
+
+No restart is needed: a running server re-reads its keys every 5
+minutes, so a cron job or systemd timer can rotate on a schedule (every
+30 days is a good choice for a hosted server). Run it from one place only;
+servers sharing a data directory all pick up the same key. The gateway
+serves only the new key configuration, under a new key id, and `info`
+publishes its hash, so wallets fetch it again. The old key keeps working
+for 7 days, for wallets that cached it, and is then deleted from memory
+and disk (spec §3.2). Requests to a
+key id the server no longer accepts get RFC 9458's `ohttp-key` problem.
+With `--drop-old`, no old key is accepted after the next reload. `doctor`
+warns when the key is more than 90 days old. Keys live in
+`data_dir/ohttp-key` and `data_dir/ohttp-retired/`; a pre-rev-3.13
+`ohttp-ikm` is migrated unchanged as key id 1.
+
 ### Rotating the VAPID key
 
 ```sh
@@ -87,7 +107,7 @@ when their next `wake` gets `unknown-device`.
 
 ## Security notes
 
-- **Data directory.** `data_dir` holds the server's own keys (OHTTP seed,
+- **Data directory.** `data_dir` holds the server's own keys (OHTTP keys,
   VAPID keys), token hashes, device records, and, when `[accounts]` uses
   them, scanning end times, last-active days, and the issuer socket
   ([`ISSUER.md`](ISSUER.md)). The directory is created
@@ -114,8 +134,8 @@ when their next `wake` gets `unknown-device`.
   may reach 64 MiB). The calls go through `rustix`, so the workspace still
   has no `unsafe` of its own.
 - **`lz-server <config> doctor`** checks the data directory's
-  permissions, core dumps, memory and swap, and the chain source (network
-  and tip age), and prints pass, warn, or fail for each. Its output has no
+  permissions, core dumps, memory and swap, the OHTTP key's age, and the
+  chain source (network and tip age), and prints pass, warn, or fail for each. Its output has no
   tokens, keys, URLs, or host names, so it's safe to paste into an issue.
 - **Web Push crypto** (`src/webpush.rs`) is built on RustCrypto primitives
   and checked against the RFC 8291 test vector. Existing Web Push crates

@@ -83,7 +83,7 @@ echo "ok: the server started, hardened, and follows the chain"
 report=$("${kit[@]}" exec -T server lz-server "$config" doctor) \
   || { echo "$report"; fail "doctor failed"; }
 echo "$report"
-for check in data-dir core-dumps memory; do
+for check in data-dir core-dumps memory ohttp-key; do
   grep -Eq "^pass +$check " <<<"$report" || fail "doctor: $check didn't pass"
 done
 # Regtest blocks carry old timestamps, so `chain` warns about the tip's

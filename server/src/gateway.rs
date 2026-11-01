@@ -26,6 +26,7 @@ use zeroize::Zeroizing;
 
 use crate::AppState;
 use crate::api::Problem;
+use crate::ohttp_keys::Decapsulated;
 
 pub const GATEWAY_PATH: &str = "/.well-known/ohttp-gateway";
 /// Largest encapsulated request: the fixed inner size plus HPKE overhead.
@@ -91,7 +92,7 @@ async fn keys_or_purposes(State(gw): State<GatewayState>, RawQuery(query): RawQu
             (header::CONTENT_TYPE, "application/ohttp-keys"),
             (header::CACHE_CONTROL, "max-age=86400"),
         ],
-        gw.app.ohttp_keys.clone(),
+        gw.app.ohttp.encoded(),
     )
         .into_response()
 }
@@ -107,12 +108,14 @@ async fn relay(
     if !is_ohttp {
         return StatusCode::UNSUPPORTED_MEDIA_TYPE.into_response();
     }
-    let Ok((plain, response_ctx)) = gw.app.ohttp.decapsulate(&body) else {
-        // Nothing can be encrypted back to the client.
-        return StatusCode::BAD_REQUEST.into_response();
-    };
+    let now = crate::unix_now();
     // The plaintext holds the bearer token (and, later, viewing keys).
-    let plain = Zeroizing::new(plain);
+    // Errors before it exists can't be encrypted back to the client.
+    let (plain, response_ctx) = match gw.app.ohttp.decapsulate(&body, now) {
+        Decapsulated::Ok(plain, ctx) => (plain, ctx),
+        Decapsulated::UnknownKey => return unknown_key(),
+        Decapsulated::Invalid => return StatusCode::BAD_REQUEST.into_response(),
+    };
     let inner = match handle_inner(&gw, plain).await {
         Ok(resp) => resp,
         Err(problem) => problem.into_response(),
@@ -148,6 +151,23 @@ async fn relay(
         Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
 }
+
+/// RFC 9458 §5.3: the request named a key id this server doesn't accept,
+/// for example one retired more than 7 days ago (spec §3.2). Wallets fetch
+/// the key configuration again.
+fn unknown_key() -> Response {
+    (
+        StatusCode::BAD_REQUEST,
+        [(header::CONTENT_TYPE, "application/problem+json")],
+        OHTTP_KEY_PROBLEM,
+    )
+        .into_response()
+}
+
+const OHTTP_KEY_PROBLEM: &str = concat!(
+    r#"{"type":"https://iana.org/assignments/http-problem-types#ohttp-key","#,
+    r#""title":"Oblivious HTTP key configuration not acceptable","status":400}"#
+);
 
 /// Checks size and padding, parses Binary HTTP, and runs the API router.
 async fn handle_inner(gw: &GatewayState, plain: Zeroizing<Vec<u8>>) -> Result<Response, Problem> {
@@ -240,6 +260,16 @@ impl Problem {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_key_problem_is_rfc_9458_json() {
+        let v: serde_json::Value = serde_json::from_str(OHTTP_KEY_PROBLEM).unwrap();
+        assert_eq!(
+            v["type"],
+            "https://iana.org/assignments/http-problem-types#ohttp-key"
+        );
+        assert_eq!(v["status"], 400);
+    }
 
     #[test]
     fn purposes_match_the_payjoin_relay_format() {

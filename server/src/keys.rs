@@ -1,24 +1,20 @@
-//! The server's own long-term keys: the OHTTP key configuration, the VAPID
-//! signing key, and the event-id secret. These are server secrets, not user data, so they live
+//! The server's own long-term keys: the VAPID signing key and the
+//! event-id secret (OHTTP keys are in [`crate::ohttp_keys`]), and helpers
+//! for owner-only files. These are server secrets, not user data, so they live
 //! in `data_dir` with owner-only permissions.
 
 use std::io::Write;
 use std::path::Path;
 
-use ohttp::hpke::{Aead, Kdf, Kem};
-use ohttp::{KeyConfig, SymmetricSuite};
 use zeroize::Zeroizing;
 
 use crate::webpush::Vapid;
 
-const OHTTP_IKM_FILE: &str = "ohttp-ikm";
 const VAPID_KEY_FILE: &str = "vapid-key";
 /// Retired VAPID keys some devices are still bound to, one file each,
 /// named by the public key (spec §5.3).
 pub const VAPID_RETIRED_DIR: &str = "vapid-retired";
 const EVENT_ID_SECRET_FILE: &str = "event-id-secret";
-/// Key id of the current OHTTP key configuration.
-const OHTTP_KEY_ID: u8 = 1;
 
 #[derive(Debug, thiserror::Error)]
 pub enum KeyError {
@@ -104,21 +100,6 @@ fn load_or_create_secret(
         }
         Err(e) => Err(KeyError::Io(label, e)),
     }
-}
-
-/// The OHTTP key configuration, derived from a stored seed so it stays the
-/// same across restarts (spec §3.2: serve one configuration to everyone).
-pub fn ohttp_key_config(dir: &Path) -> Result<KeyConfig, KeyError> {
-    let ikm = Zeroizing::new(load_or_create_secret(dir, OHTTP_IKM_FILE, |_| true)?);
-    Ok(KeyConfig::derive(
-        OHTTP_KEY_ID,
-        Kem::X25519Sha256,
-        vec![
-            SymmetricSuite::new(Kdf::HkdfSha256, Aead::Aes128Gcm),
-            SymmetricSuite::new(Kdf::HkdfSha256, Aead::ChaCha20Poly1305),
-        ],
-        &ikm[..],
-    )?)
 }
 
 /// The VAPID (RFC 8292) signing key for push requests.

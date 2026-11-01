@@ -54,8 +54,54 @@ pub async fn run(config: &Config) -> Vec<Check> {
         data_dir(&config.data_dir),
         core_dumps(&hardening::inspect()),
         memory(&hardening::inspect(), config),
+        ohttp_key(config, now_secs()),
         chain(config).await,
     ]
+}
+
+fn now_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+/// The OHTTP key's age: rotate at least every 90 days (spec §3.2).
+pub fn ohttp_key(config: &Config, now: u64) -> Check {
+    const NAME: &str = "ohttp-key";
+    if config.direct_api {
+        return check(
+            Status::Pass,
+            NAME,
+            "not used: wallets reach this server as an onion service",
+        );
+    }
+    match crate::ohttp_keys::read_current(&config.data_dir) {
+        Ok(None) => check(
+            Status::Warn,
+            NAME,
+            "not created yet; the server creates it at first start",
+        ),
+        Err(_) => check(
+            Status::Fail,
+            NAME,
+            "the OHTTP key file is unreadable or corrupt",
+        ),
+        Ok(Some(key)) => {
+            let days = now.saturating_sub(key.created_at) / 86_400;
+            if now.saturating_sub(key.created_at) > crate::ohttp_keys::MAX_AGE_SECS {
+                check(
+                    Status::Warn,
+                    NAME,
+                    format!(
+                        "{days} days old: rotate it (rotate-ohttp, then restart) at least every 90 days"
+                    ),
+                )
+            } else {
+                check(Status::Pass, NAME, format!("{days} days old"))
+            }
+        }
+    }
 }
 
 /// Owner-only permissions on the data directory and everything in it.
@@ -77,8 +123,13 @@ pub fn data_dir(dir: &Path) -> Check {
         if loose(dir) {
             bad.push("the directory itself".into());
         }
-        let sub = dir.join(crate::keys::VAPID_RETIRED_DIR);
-        for (base, label) in [(dir, ""), (sub.as_path(), "vapid-retired/")] {
+        let vapid = dir.join(crate::keys::VAPID_RETIRED_DIR);
+        let ohttp = dir.join(crate::ohttp_keys::RETIRED_DIR);
+        for (base, label) in [
+            (dir, ""),
+            (vapid.as_path(), "vapid-retired/"),
+            (ohttp.as_path(), "ohttp-retired/"),
+        ] {
             let Ok(entries) = std::fs::read_dir(base) else {
                 continue;
             };
@@ -252,6 +303,33 @@ mod tests {
         let ahead = tip_check(5, now + 600, now);
         assert_eq!(ahead.status, Status::Warn);
         assert!(ahead.detail.contains("clock"));
+    }
+
+    #[test]
+    fn ohttp_key_age() {
+        let mut raw = [0u8; 8];
+        rand::fill(&mut raw);
+        let name: String = raw.iter().map(|b| format!("{b:02x}")).collect();
+        let dir = std::env::temp_dir().join(format!("lz-doctor-ohttp-{name}"));
+        let mut config: Config = toml::from_str(&format!(
+            "listen = \"127.0.0.1:0\"\npublic_host = \"lz.example.org\"\n\
+             network = \"main\"\ndata_dir = {:?}\nvapid_contact = \"mailto:a@b\"\n",
+            dir.display().to_string()
+        ))
+        .unwrap();
+        let t0 = 1_800_000_000;
+        assert_eq!(ohttp_key(&config, t0).status, Status::Warn, "not created");
+        crate::ohttp_keys::load(&dir, t0).unwrap();
+        let fresh = ohttp_key(&config, t0 + 89 * 86_400);
+        assert_eq!(fresh.status, Status::Pass);
+        assert_eq!(fresh.detail, "89 days old");
+        let old = ohttp_key(&config, t0 + 91 * 86_400);
+        assert_eq!(old.status, Status::Warn);
+        assert!(old.detail.contains("rotate-ohttp"));
+        config.public_host = format!("{}.onion", "a".repeat(56));
+        config.direct_api = true;
+        assert_eq!(ohttp_key(&config, t0 + 91 * 86_400).status, Status::Pass);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[cfg(unix)]

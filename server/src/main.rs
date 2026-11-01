@@ -6,6 +6,9 @@
 //! connection URL once (self-hosting; spec §2.3).
 //! `lz-server <config.toml> rotate-vapid [--drop-old]` replaces the VAPID
 //! key, used from the next start (spec §5.3).
+//! `lz-server <config.toml> rotate-ohttp [--drop-old]` replaces the OHTTP
+//! key; a running server serves it within 5 minutes, and accepts the old
+//! one for 7 days (spec §3.2).
 //! `lz-server <config.toml> doctor` checks the install and prints pass,
 //! warn, or fail for each check, with nothing secret in the output.
 
@@ -35,7 +38,7 @@ async fn main() -> ExitCode {
         [c, cmd, flag] => (PathBuf::from(c), Some(cmd.as_str()), Some(flag.as_str())),
         _ => {
             tracing::error!(
-                "usage: lz-server <config.toml> [init … | new-account | rotate-vapid [--drop-old] | doctor]"
+                "usage: lz-server <config.toml> [init … | new-account | rotate-vapid [--drop-old] | rotate-ohttp [--drop-old] | doctor]"
             );
             return ExitCode::FAILURE;
         }
@@ -54,6 +57,8 @@ async fn main() -> ExitCode {
         (Some("doctor"), None) => doctor(&config).await,
         (Some("rotate-vapid"), None) => rotate_vapid(&config, false),
         (Some("rotate-vapid"), Some("--drop-old")) => rotate_vapid(&config, true),
+        (Some("rotate-ohttp"), None) => rotate_ohttp(&config, false),
+        (Some("rotate-ohttp"), Some("--drop-old")) => rotate_ohttp(&config, true),
         (Some(other), _) => {
             tracing::error!(command = other, "unknown command or option");
             ExitCode::FAILURE
@@ -114,6 +119,7 @@ async fn serve(config: Config) -> ExitCode {
     }
     tokio::spawn(scanner::sweep_loop(state.clone()));
     tokio::spawn(lz_server::account_sweep_loop(state.clone()));
+    tokio::spawn(lz_server::ohttp_key_sweep_loop(state.clone()));
     if state.config.accounts.issuer_socket {
         #[cfg(unix)]
         {
@@ -207,6 +213,25 @@ async fn doctor(config: &Config) -> ExitCode {
         ExitCode::FAILURE
     } else {
         ExitCode::SUCCESS
+    }
+}
+
+/// Retires the OHTTP key (spec §3.2). A running server switches within
+/// [`lz_server::OHTTP_KEY_RELOAD`]; no restart is needed.
+fn rotate_ohttp(config: &Config, drop_old: bool) -> ExitCode {
+    match lz_server::rotate_ohttp(&config.data_dir, drop_old) {
+        Ok(key_id) => {
+            tracing::info!(
+                key_id,
+                drop_old,
+                "new OHTTP key; a running server serves it within 5 minutes"
+            );
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "OHTTP key rotation failed");
+            ExitCode::FAILURE
+        }
     }
 }
 

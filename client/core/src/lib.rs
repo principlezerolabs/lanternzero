@@ -52,9 +52,19 @@ pub enum Error {
     /// The request doesn't fit the fixed size (spec §3.3).
     #[error("request too large for the fixed size")]
     TooLarge,
-    /// The relay answered with this HTTP status instead of forwarding.
+    /// The relay, or the server's gateway, answered with this HTTP status
+    /// without an encapsulated response. A relay may hide the reason
+    /// (RFC 9458 §5.2), so if the key configuration was fetched more than
+    /// an hour ago, fetch it again as for [`Error::KeyConfigRejected`]
+    /// (spec §3.2).
     #[error("relay answered {0}")]
     Relay(u16),
+    /// The server no longer accepts the OHTTP key configuration in use,
+    /// for example a week after it rotated (spec §3.2). Fetch it again
+    /// through two relays ([`KeyConfig::from_two_relays`]),
+    /// [`Client::set_key_config`], and build the request again.
+    #[error("the server no longer accepts this OHTTP key configuration")]
+    KeyConfigRejected,
     /// The response couldn't be decrypted, wasn't the fixed size, or wasn't
     /// valid Binary HTTP.
     #[error("malformed or unauthentic response")]

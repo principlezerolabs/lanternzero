@@ -26,6 +26,7 @@ pub mod issuer;
 pub mod keys;
 pub mod limits;
 pub mod mempool;
+pub mod ohttp_keys;
 pub mod push;
 pub mod scanner;
 pub mod ssrf;
@@ -39,11 +40,8 @@ use std::sync::Arc;
 pub struct AppState {
     pub config: config::Config,
     pub store: store::Store,
-    pub ohttp: ohttp::Server,
-    /// The key configuration list, as served (`application/ohttp-keys`).
-    pub ohttp_keys: Vec<u8>,
-    /// Hex SHA-256 of `ohttp_keys`, published in `info` (spec §3.2).
-    pub ohttp_keys_sha256: String,
+    /// The current OHTTP key, and retired ones during their overlap.
+    pub ohttp: ohttp_keys::Gateway,
     /// The current VAPID key and retired ones still bound to devices.
     pub vapid: keys::VapidKeys,
     pub http: reqwest::Client,
@@ -83,13 +81,13 @@ pub enum StartError {
 
 impl AppState {
     pub fn new(config: config::Config) -> Result<Arc<Self>, StartError> {
-        use sha2_shim::sha256_hex;
-
         keys::create_private_dir(&config.data_dir)?;
-        let key_config = keys::ohttp_key_config(&config.data_dir)?;
-        let ohttp_keys = ohttp::KeyConfig::encode_list(&[&key_config])?;
-        let ohttp_keys_sha256 = sha256_hex(&ohttp_keys);
-        let ohttp = ohttp::Server::new(key_config)?;
+        let now = unix_now();
+        let pruned = ohttp_keys::prune(&config.data_dir, now)?;
+        if pruned > 0 {
+            tracing::info!(pruned, "deleted OHTTP keys past their overlap");
+        }
+        let ohttp = ohttp_keys::Gateway::new(&ohttp_keys::load(&config.data_dir, now)?)?;
         let allow_private = config.push.allow_private_targets;
         let http = reqwest::Client::builder()
             .dns_resolver(ssrf::SafeResolver { allow_private })
@@ -116,8 +114,6 @@ impl AppState {
             config,
             store,
             ohttp,
-            ohttp_keys,
-            ohttp_keys_sha256,
             vapid,
             http,
             chain: Arc::default(),
@@ -177,6 +173,49 @@ pub async fn account_sweep_loop(state: Arc<AppState>) {
     }
 }
 
+pub(crate) fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+/// How often the server re-reads its OHTTP keys from disk.
+pub const OHTTP_KEY_RELOAD: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// Every [`OHTTP_KEY_RELOAD`]: switches to a key `rotate-ohttp` made, and
+/// forgets retired keys past their overlap, in memory and on disk (spec
+/// §3.2), so neither waits for a restart.
+pub async fn ohttp_key_sweep_loop(state: Arc<AppState>) {
+    let mut tick = tokio::time::interval(OHTTP_KEY_RELOAD);
+    tick.tick().await; // AppState::new just loaded them.
+    loop {
+        tick.tick().await;
+        let now = unix_now();
+        let dropped = state.ohttp.drop_expired(now);
+        match ohttp_keys::prune(&state.config.data_dir, now) {
+            Ok(pruned) if dropped + pruned > 0 => {
+                tracing::info!(dropped, pruned, "retired OHTTP keys past their overlap");
+            }
+            Ok(_) => {}
+            Err(e) => tracing::error!(error = %e, "cannot delete retired OHTTP keys"),
+        }
+        match state.ohttp.reload(&state.config.data_dir, now) {
+            Ok(Some(key_id)) => tracing::info!(key_id, "serving the OHTTP key on disk"),
+            Ok(None) => {}
+            Err(e) => tracing::error!(error = %e, "cannot reload the OHTTP keys"),
+        }
+    }
+}
+
+/// `lz-server <config> rotate-ohttp [--drop-old]` (spec §3.2): a running
+/// server serves the new key within [`OHTTP_KEY_RELOAD`], and the old one
+/// is accepted for 7 days from now (not at all with `drop_old`). Returns
+/// the new key id.
+pub fn rotate_ohttp(dir: &std::path::Path, drop_old: bool) -> Result<u8, StartError> {
+    Ok(ohttp_keys::rotate(dir, unix_now(), drop_old)?)
+}
+
 /// Loads the VAPID keys and reconciles them with the devices (spec §5.3):
 /// records from before rotation are bound to the current key, devices bound
 /// to a dropped key are removed (they can't be signed for), and retired
@@ -233,14 +272,4 @@ pub fn log_filter(default: &str) -> tracing_subscriber::EnvFilter {
         filter = filter.add_directive(format!("{dep}=warn").parse().expect("valid directive"));
     }
     filter
-}
-
-mod sha2_shim {
-    use sha2::{Digest, Sha256};
-    pub fn sha256_hex(bytes: &[u8]) -> String {
-        Sha256::digest(bytes)
-            .iter()
-            .map(|b| format!("{b:02x}"))
-            .collect()
-    }
 }

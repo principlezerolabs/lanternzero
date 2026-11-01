@@ -266,7 +266,7 @@ async fn info(State(state): State<Arc<AppState>>) -> Response {
             long_poll_wait_secs: [25, 30],
             finality_depth: FINALITY_DEPTH,
             vapid_public_key: state.vapid.current().public_b64.clone(),
-            ohttp_key_config_sha256: state.ohttp_keys_sha256.clone(),
+            ohttp_key_config_sha256: state.ohttp.sha256_hex(),
             idle_account_days: Some(state.config.accounts.idle_account_days).filter(|&d| d > 0),
             attestation: None,
         },

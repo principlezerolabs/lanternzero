@@ -354,7 +354,7 @@ pub fn run(config_path: &Path, opts: &InitOptions) -> Result<Zeroizing<String>, 
     // start doesn't race anything.
     crate::keys::create_private_dir(&data_dir)
         .map_err(|e| InitError::Io("cannot create data_dir", e))?;
-    crate::keys::ohttp_key_config(&data_dir)?;
+    crate::ohttp_keys::load(&data_dir, crate::unix_now())?;
     crate::keys::vapid_keys(&data_dir)?;
     crate::keys::event_id_secret(&data_dir)?;
 
@@ -547,7 +547,7 @@ mod tests {
 
         // Keys and the account exist; the server can start on them.
         for f in [
-            "ohttp-ikm",
+            crate::ohttp_keys::CURRENT_FILE,
             "vapid-key",
             "event-id-secret",
             crate::store::ACCOUNTS_FILE,

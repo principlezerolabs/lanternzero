@@ -20,7 +20,7 @@ use super::harness::{
 async fn serves_key_config_and_relay_purposes() {
     let h = harness(false);
     let keys = h.key_config().await;
-    assert_eq!(keys, h.state.ohttp_keys);
+    assert_eq!(keys, h.state.ohttp.encoded());
     let resp = h
         .outer(
             Request::get(format!("{}?allowed_purposes", gateway::GATEWAY_PATH))
@@ -46,7 +46,7 @@ async fn info_works_without_a_token_and_responses_are_fixed_size() {
     assert_eq!(r.json["network"], "main");
     assert_eq!(
         r.json["ohttp_key_config_sha256"],
-        h.state.ohttp_keys_sha256.as_str()
+        h.state.ohttp.sha256_hex().as_str()
     );
     assert_eq!(r.json["attestation"], Value::Null);
 }

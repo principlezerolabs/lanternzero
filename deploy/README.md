@@ -65,7 +65,8 @@ docker compose exec server lz-server /var/lib/lantern-zero/config.toml doctor
 ```
 
 It prints pass, warn, or fail for the data directory, core dumps, memory
-and swap, and the chain source. The output has no tokens, keys, URLs, or
+and swap, the OHTTP key's age (not used by onion services), and the chain
+source. The output has no tokens, keys, URLs, or
 onion names, so it's safe to paste into an issue.
 
 ## Hardening (spec §6.2)
