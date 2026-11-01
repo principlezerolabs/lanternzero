@@ -18,7 +18,8 @@ use ohttp::hpke::{Aead, Kdf, Kem};
 use ohttp::{KeyConfig, SymmetricSuite};
 use zeroize::Zeroizing;
 
-use crate::keys::{KeyError, create_private_dir, write_private_atomic};
+use crate::files::{create_private_dir, read_files, write_private_atomic};
+use crate::keys::{KeyError, io};
 
 pub const CURRENT_FILE: &str = "ohttp-key";
 pub const RETIRED_DIR: &str = "ohttp-retired";
@@ -121,10 +122,6 @@ pub struct OhttpKeys {
     pub retired: Vec<OhttpKey>,
 }
 
-fn io(label: &str) -> impl FnOnce(std::io::Error) -> KeyError + '_ {
-    move |e| KeyError::Io(label.to_owned(), e)
-}
-
 /// Reads the current key without creating or migrating anything (for
 /// `doctor`). A pre-rev-3.13 seed reads as key id 1, made at its file's
 /// modification time.
@@ -151,8 +148,7 @@ pub fn read_current(dir: &Path) -> Result<Option<OhttpKey>, KeyError> {
     let created_at = std::fs::metadata(&legacy)
         .and_then(|m| m.modified())
         .ok()
-        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-        .map_or(0, |d| d.as_secs());
+        .map_or(0, crate::clock::unix_secs);
     Ok(Some(OhttpKey {
         id: LEGACY_KEY_ID,
         created_at,
@@ -164,20 +160,9 @@ pub fn read_current(dir: &Path) -> Result<Option<OhttpKey>, KeyError> {
 /// Each retired key on disk, with its file's path.
 fn retired_files(dir: &Path) -> Result<Vec<(std::path::PathBuf, OhttpKey)>, KeyError> {
     let rdir = dir.join(RETIRED_DIR);
-    let label = rdir.display().to_string();
-    let entries = match std::fs::read_dir(&rdir) {
-        Ok(e) => e,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(e) => return Err(KeyError::Io(label, e)),
-    };
     let mut out = Vec::new();
-    for entry in entries {
-        let path = entry.map_err(io(&label))?.path();
-        if path.extension().is_some_and(|x| x == "tmp") {
-            continue;
-        }
+    for (path, bytes) in read_files(&rdir).map_err(io(&rdir.display().to_string()))? {
         let name = path.display().to_string();
-        let bytes = Zeroizing::new(std::fs::read(&path).map_err(io(&name))?);
         let key = OhttpKey::decode(&bytes, &name)?;
         if key.retired_at.is_none() {
             return Err(KeyError::Corrupt(name));
@@ -313,13 +298,9 @@ struct Keys {
 
 impl Keys {
     fn build(keys: &OhttpKeys) -> Result<Self, KeyError> {
-        use sha2::{Digest, Sha256};
         let config = keys.current.config()?;
         let encoded = KeyConfig::encode_list(&[&config])?;
-        let sha256_hex = Sha256::digest(&encoded)
-            .iter()
-            .map(|b| format!("{b:02x}"))
-            .collect();
+        let sha256_hex = lz_proto::key_config_sha256_hex(&encoded);
         let mut retired = Vec::new();
         for k in &keys.retired {
             if let Some(until) = k.accepted_until() {
@@ -450,13 +431,8 @@ mod tests {
 
     const T0: u64 = 1_800_000_000;
 
-    fn tmp() -> std::path::PathBuf {
-        let mut raw = [0u8; 8];
-        rand::fill(&mut raw);
-        let name: String = raw.iter().map(|b| format!("{b:02x}")).collect();
-        let d = std::env::temp_dir().join(format!("lz-ohttp-{name}"));
-        create_private_dir(&d).unwrap();
-        d
+    fn tmp() -> crate::files::TestDir {
+        crate::files::TestDir::new("ohttp")
     }
 
     /// A request encapsulated to `config`, as a wallet sends it.

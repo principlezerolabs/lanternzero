@@ -5,8 +5,9 @@
 //! issue or hand to the self-hosting skill.
 
 use std::path::Path;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
+use crate::clock::unix_now;
 use crate::config::Config;
 use crate::hardening::{self, Lock, Swap, Verdict};
 
@@ -54,16 +55,9 @@ pub async fn run(config: &Config) -> Vec<Check> {
         data_dir(&config.data_dir),
         core_dumps(&hardening::inspect()),
         memory(&hardening::inspect(), config),
-        ohttp_key(config, now_secs()),
+        ohttp_key(config, unix_now()),
         chain(config).await,
     ]
-}
-
-fn now_secs() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
 }
 
 /// The OHTTP key's age: rotate at least every 90 days (spec §3.2).
@@ -257,11 +251,7 @@ pub async fn chain(config: &Config) -> Check {
             "the chain source didn't serve its tip block",
         );
     };
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    tip_check(tip, time, now)
+    tip_check(tip, time, unix_now())
 }
 
 /// Judges the tip's age; a block from the future means this clock is
@@ -307,10 +297,9 @@ mod tests {
 
     #[test]
     fn ohttp_key_age() {
-        let mut raw = [0u8; 8];
-        rand::fill(&mut raw);
-        let name: String = raw.iter().map(|b| format!("{b:02x}")).collect();
-        let dir = std::env::temp_dir().join(format!("lz-doctor-ohttp-{name}"));
+        // A data directory that doesn't exist yet.
+        let tmp = crate::files::TestDir::new("doctor-ohttp");
+        let dir = tmp.join("data");
         let mut config: Config = toml::from_str(&format!(
             "listen = \"127.0.0.1:0\"\npublic_host = \"lz.example.org\"\n\
              network = \"main\"\ndata_dir = {:?}\nvapid_contact = \"mailto:a@b\"\n",
@@ -329,24 +318,21 @@ mod tests {
         config.public_host = format!("{}.onion", "a".repeat(56));
         config.direct_api = true;
         assert_eq!(ohttp_key(&config, t0 + 91 * 86_400).status, Status::Pass);
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[cfg(unix)]
     #[test]
     fn data_dir_permissions() {
         use std::os::unix::fs::PermissionsExt;
-        let mut raw = [0u8; 8];
-        rand::fill(&mut raw);
-        let name: String = raw.iter().map(|b| format!("{b:02x}")).collect();
-        let dir = std::env::temp_dir().join(format!("lz-doctor-{name}"));
+        let tmp = crate::files::TestDir::new("doctor");
+        let dir = tmp.join("data");
         assert_eq!(data_dir(&dir).status, Status::Warn);
-        crate::keys::create_private_dir(&dir).unwrap();
-        crate::keys::write_private_atomic(&dir, "accounts.txt", b"").unwrap();
+        crate::files::create_private_dir(&dir).unwrap();
+        crate::files::write_private_atomic(&dir, "accounts.txt", b"").unwrap();
         assert_eq!(data_dir(&dir).status, Status::Pass);
 
         let retired = dir.join(crate::keys::VAPID_RETIRED_DIR);
-        crate::keys::create_private_dir(&retired).unwrap();
+        crate::files::create_private_dir(&retired).unwrap();
         std::fs::write(retired.join("BPublicKeyName"), [1; 32]).unwrap();
         std::fs::set_permissions(
             retired.join("BPublicKeyName"),
@@ -362,6 +348,5 @@ mod tests {
         assert_eq!(c.status, Status::Fail);
         assert!(c.detail.contains("accounts.txt"), "{}", c.detail);
         assert!(!c.detail.contains("BPublicKeyName"), "key names stay out");
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

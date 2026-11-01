@@ -112,19 +112,12 @@ impl TokenHash {
 
     /// Lowercase hex, as sent in `new_token_hash` (spec §4.6).
     pub fn to_hex(&self) -> String {
-        self.0.iter().map(|b| format!("{b:02x}")).collect()
+        crate::hex::encode(&self.0)
     }
 
     /// Parses 64 hex digits (either case).
     pub fn from_hex(hex: &str) -> Option<Self> {
-        if hex.len() != 64 || !hex.is_ascii() {
-            return None;
-        }
-        let mut out = [0u8; 32];
-        for (i, byte) in out.iter_mut().enumerate() {
-            *byte = u8::from_str_radix(&hex[2 * i..2 * i + 2], 16).ok()?;
-        }
-        Some(Self(out))
+        crate::hex::decode(hex).map(Self)
     }
 }
 

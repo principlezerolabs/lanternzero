@@ -37,10 +37,7 @@ async fn main() -> ExitCode {
         }
     };
     if let Some(drop_old) = rotate {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
+        let now = lz_gateway::now_unix();
         return match lz_gateway::keys::KeyRing::rotate(&config.data_dir, now, drop_old) {
             Ok(id) => {
                 tracing::info!(

@@ -30,6 +30,7 @@ zeroize = "1.8"
 
 [dev-dependencies]
 # Real server code signs and encrypts the pushes the tests send.
+lz-client = { path = "../client/core" }
 lz-server = { path = "../server" }
 lz-proto = { path = "../crates/lz-proto" }
 

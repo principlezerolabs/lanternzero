@@ -13,7 +13,8 @@ use lz_server::{gateway, push};
 use serde_json::{Value, json};
 
 use super::harness::{
-    BASE, Captured, HOST, global_logs, harness, harness_with, problem_slug, receiver, ua_keys,
+    BASE, Captured, HOST, global_logs, harness, harness_with, open_push, problem_slug, receiver,
+    ua_keys,
 };
 
 #[tokio::test]
@@ -215,7 +216,7 @@ async fn wake_round_delivers_encrypted_fixed_pings_and_drops_gone_devices() {
             .unwrap()
             .starts_with("vapid t=")
     );
-    let plain = lz_server::webpush::decrypt(&body, &secret, &auth).unwrap();
+    let plain = open_push(&body, &(secret, auth));
     assert_eq!(plain, push::wake_plaintext());
 
     // A gateway that answers 410 makes the server forget the device.

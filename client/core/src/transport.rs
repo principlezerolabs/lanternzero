@@ -13,7 +13,6 @@ use std::time::{Duration, UNIX_EPOCH};
 use bhttp::{Message, Mode};
 use lz_proto::padding::{REQUEST_SIZE, RESPONSE_SIZE};
 use lz_proto::token::AccountToken;
-use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
 
 use crate::Error;
@@ -65,10 +64,9 @@ impl KeyConfig {
     pub fn from_cache(encoded: &[u8]) -> Result<Self, KeyConfigError> {
         ohttp::ClientRequest::from_encoded_config_list(encoded)
             .map_err(|_| KeyConfigError::Invalid)?;
-        let digest = Sha256::digest(encoded);
         Ok(Self {
             encoded: encoded.to_vec(),
-            sha256_hex: digest.iter().map(|b| format!("{b:02x}")).collect(),
+            sha256_hex: lz_proto::key_config_sha256_hex(encoded),
         })
     }
 
@@ -259,10 +257,6 @@ pub(crate) fn build(
     }
 }
 
-/// RFC 9458 §5.3's problem type for a key configuration the gateway
-/// doesn't accept.
-const OHTTP_KEY_PROBLEM_TYPE: &str = "https://iana.org/assignments/http-problem-types#ohttp-key";
-
 /// Whether an unencapsulated error body is the `ohttp-key` problem.
 fn is_ohttp_key_problem(body: &[u8]) -> bool {
     #[derive(serde::Deserialize)]
@@ -273,7 +267,7 @@ fn is_ohttp_key_problem(body: &[u8]) -> bool {
     serde_json::from_slice::<Problem<'_>>(body)
         .ok()
         .and_then(|p| p.kind)
-        .is_some_and(|t| t == OHTTP_KEY_PROBLEM_TYPE)
+        .is_some_and(|t| t == lz_proto::problem::OHTTP_KEY_TYPE)
 }
 
 /// Opens a response with the matching [`Opener`].

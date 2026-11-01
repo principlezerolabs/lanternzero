@@ -30,12 +30,7 @@ pub(crate) struct Harness {
 }
 
 fn temp_dir() -> PathBuf {
-    let mut raw = [0u8; 8];
-    rand::fill(&mut raw);
-    let name: String = raw.iter().map(|b| format!("{b:02x}")).collect();
-    let d = std::env::temp_dir().join(format!("lz-e2e-{name}"));
-    std::fs::create_dir_all(&d).unwrap();
-    d
+    crate::common::temp_dir("e2e")
 }
 
 pub(crate) fn harness(allow_private_targets: bool) -> Harness {
@@ -242,6 +237,13 @@ impl Harness {
             seq: self.seq,
         }
     }
+}
+
+/// Opens a push body as the wallet does, with the client core's receiver.
+pub(crate) fn open_push(body: &[u8], keys: &(p256::SecretKey, [u8; 16])) -> Vec<u8> {
+    let receiver = lz_client::PushReceiver::from_bytes(&keys.0.to_bytes().into(), &keys.1)
+        .expect("valid receiver keys");
+    receiver.decrypt(body).expect("push decrypts").to_vec()
 }
 
 /// A device's RFC 8291 receiver key pair and auth secret.

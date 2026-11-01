@@ -21,6 +21,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use bhttp::{Message, Mode};
 use lz_proto::padding::{REQUEST_SIZE, RESPONSE_SIZE, pad_bhttp};
+use lz_proto::problem;
 use tower::ServiceExt;
 use zeroize::Zeroizing;
 
@@ -108,7 +109,7 @@ async fn relay(
     if !is_ohttp {
         return StatusCode::UNSUPPORTED_MEDIA_TYPE.into_response();
     }
-    let now = crate::unix_now();
+    let now = crate::clock::unix_now();
     // The plaintext holds the bearer token (and, later, viewing keys).
     // Errors before it exists can't be encrypted back to the client.
     let (plain, response_ctx) = match gw.app.ohttp.decapsulate(&body, now) {
@@ -127,7 +128,7 @@ async fn relay(
             match encode_response(
                 Problem::new(
                     StatusCode::INTERNAL_SERVER_ERROR,
-                    "internal",
+                    problem::INTERNAL,
                     "internal error",
                 )
                 .into_response(),
@@ -174,7 +175,7 @@ async fn handle_inner(gw: &GatewayState, plain: Zeroizing<Vec<u8>>) -> Result<Re
     let wrong_size = || {
         Problem::new(
             StatusCode::BAD_REQUEST,
-            "bad-size",
+            problem::BAD_SIZE,
             "inner request must be exactly 4096 bytes",
         )
     };
@@ -191,7 +192,7 @@ async fn handle_inner(gw: &GatewayState, plain: Zeroizing<Vec<u8>>) -> Result<Re
     let bad_target = || {
         Problem::new(
             StatusCode::BAD_REQUEST,
-            "bad-target",
+            problem::BAD_TARGET,
             "wrong request target",
         )
     };
@@ -224,7 +225,7 @@ async fn handle_inner(gw: &GatewayState, plain: Zeroizing<Vec<u8>>) -> Result<Re
     }
     let req = req
         .body(Body::from(msg.content().to_vec()))
-        .map_err(|_| Problem::bad_request_public("malformed inner request"))?;
+        .map_err(|_| Problem::bad_request("malformed inner request"))?;
     Ok(gw
         .api
         .clone()
@@ -251,12 +252,6 @@ async fn encode_response(resp: Response) -> Option<Vec<u8>> {
     pad_bhttp(out, RESPONSE_SIZE).ok()
 }
 
-impl Problem {
-    fn bad_request_public(title: &'static str) -> Self {
-        Problem::new(StatusCode::BAD_REQUEST, "bad-request", title)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -264,10 +259,7 @@ mod tests {
     #[test]
     fn the_key_problem_is_rfc_9458_json() {
         let v: serde_json::Value = serde_json::from_str(OHTTP_KEY_PROBLEM).unwrap();
-        assert_eq!(
-            v["type"],
-            "https://iana.org/assignments/http-problem-types#ohttp-key"
-        );
+        assert_eq!(v["type"], problem::OHTTP_KEY_TYPE);
         assert_eq!(v["status"], 400);
     }
 

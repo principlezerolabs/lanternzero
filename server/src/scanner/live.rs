@@ -94,8 +94,7 @@ pub fn alert(state: &Arc<AppState>, new: Vec<(AccountId, Event)>, now: SystemTim
         if !seen.insert((account, event.compact_tx.clone())) {
             continue;
         }
-        let key: String = account.iter().map(|b| format!("{b:02x}")).collect();
-        if state.payment_push_limiter.check(&key, now).is_err() {
+        if state.payment_push_limiter.check(&account, now).is_err() {
             continue;
         }
         let state = state.clone();

@@ -27,9 +27,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use lz_proto::api::DeviceRegistration;
+use lz_proto::hex::{decode as unhex, encode as hex};
 use lz_proto::replay::{ReplayError, SeqWindow};
 use lz_proto::token::TokenHash;
 use serde::{Deserialize, Serialize};
+
+use crate::clock::unix_now;
 
 pub const ACCOUNTS_FILE: &str = "accounts.txt";
 const ACCOUNTS_LOCK: &str = "accounts.lock";
@@ -229,21 +232,6 @@ pub struct Store {
     log_deletions: AtomicBool,
 }
 
-fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
-}
-
-fn unhex<const N: usize>(s: &str) -> Option<[u8; N]> {
-    if s.len() != 2 * N || !s.is_ascii() {
-        return None;
-    }
-    let mut out = [0u8; N];
-    for (i, b) in out.iter_mut().enumerate() {
-        *b = u8::from_str_radix(&s[2 * i..2 * i + 2], 16).ok()?;
-    }
-    Some(out)
-}
-
 fn check_private_file(path: &Path) -> std::io::Result<()> {
     #[cfg(unix)]
     {
@@ -265,7 +253,7 @@ impl Store {
     pub fn open(dir: &Path) -> std::io::Result<Self> {
         check_private_file(&dir.join(ACCOUNTS_FILE))?;
         check_private_file(&dir.join(STATE_FILE))?;
-        let now = now_unix();
+        let now = unix_now();
         let on_disk = read_accounts(dir)?;
         let expired = on_disk.iter().any(|e| !e.valid_at(now));
         let accounts: Vec<Entry> = on_disk.into_iter().filter(|e| e.valid_at(now)).collect();
@@ -321,7 +309,7 @@ impl Store {
         let mut id = [0u8; 16];
         rand::fill(&mut id);
         let _lock = lock_accounts(dir)?;
-        let mut f = crate::keys::private_file()
+        let mut f = crate::files::private_file()
             .create(true)
             .append(true)
             .open(dir.join(ACCOUNTS_FILE))?;
@@ -333,7 +321,7 @@ impl Store {
     /// The account for a token hash, if any. Compares every stored hash in
     /// constant time (spec §2.2).
     pub fn authenticate(&self, hash: &TokenHash) -> Option<AccountId> {
-        self.authenticate_at(hash, now_unix())
+        self.authenticate_at(hash, unix_now())
     }
 
     /// [`authenticate`](Self::authenticate) at `now_unix`. The first use of
@@ -609,7 +597,7 @@ impl Store {
 
     /// Whether the account still exists.
     pub fn has_account(&self, account: AccountId) -> bool {
-        self.has_account_at(account, now_unix())
+        self.has_account_at(account, unix_now())
     }
 
     pub fn has_account_at(&self, account: AccountId, now: u64) -> bool {
@@ -629,7 +617,7 @@ impl Store {
             let mut accounts = self.accounts.lock().expect("accounts lock");
             self.rewrite_accounts(
                 &mut accounts,
-                now_unix(),
+                unix_now(),
                 &mut |e| (e.account != account).then_some(*e),
                 None,
             )?;
@@ -648,7 +636,7 @@ impl Store {
                 st.deletions.push(Deletion {
                     seq,
                     account: id,
-                    at: now_unix(),
+                    at: unix_now(),
                 });
             }
         }
@@ -689,7 +677,7 @@ impl Store {
             text.push_str(&e.line());
             text.push('\n');
         }
-        crate::keys::write_private_atomic(&self.dir, ACCOUNTS_FILE, text.as_bytes())?;
+        crate::files::write_private_atomic(&self.dir, ACCOUNTS_FILE, text.as_bytes())?;
         let mut next: Vec<Entry> = memory.iter().filter_map(&mut *keep).chain(add).collect();
         next.retain(|e| e.valid_at(now_unix));
         *memory = next;
@@ -860,18 +848,8 @@ impl Store {
             let st = self.state.lock().expect("store lock");
             serde_json::to_vec(&*st).expect("state serializes")
         };
-        let tmp = self.dir.join(format!("{STATE_FILE}.tmp"));
-        crate::keys::private_file()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .open(&tmp)
-            .and_then(|mut f| {
-                use std::io::Write;
-                f.write_all(&bytes)?;
-                f.sync_all()
-            })
-            .and_then(|()| std::fs::rename(&tmp, self.dir.join(STATE_FILE)))
+        // Also syncs the directory, so the rename survives a crash.
+        crate::files::write_private_atomic(&self.dir, STATE_FILE, &bytes)
     }
 }
 
@@ -912,7 +890,7 @@ fn read_accounts(dir: &Path) -> std::io::Result<Vec<Entry>> {
 /// Serializes writers of `accounts.txt` across processes (the server and
 /// `new-account`). Released when the returned file is dropped.
 fn lock_accounts(dir: &Path) -> std::io::Result<std::fs::File> {
-    let f = crate::keys::private_file()
+    let f = crate::files::private_file()
         .create(true)
         .truncate(false)
         .write(true)
@@ -936,25 +914,14 @@ pub fn parse_account(s: &str) -> Option<AccountId> {
     unhex::<16>(s)
 }
 
-fn now_unix() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use lz_proto::api::PushKeys;
     use lz_proto::token::AccountToken;
 
-    fn tmp() -> PathBuf {
-        let mut raw = [0u8; 8];
-        rand::fill(&mut raw);
-        let d = std::env::temp_dir().join(format!("lz-store-{}", hex(&raw)));
-        std::fs::create_dir_all(&d).unwrap();
-        d
+    fn tmp() -> crate::files::TestDir {
+        crate::files::TestDir::new("store")
     }
 
     fn reg(endpoint: &str, seq: u64) -> DeviceRegistration {
@@ -1396,7 +1363,7 @@ mod tests {
         assert_eq!(store.deletions(0, 1), (vec![b], 1));
         assert_eq!(store.deletions(1, 10), (vec![c], 2));
         assert_eq!(store.deletions(2, 10), (vec![], 2));
-        store.sweep(0, now_unix() + ISSUER_RETENTION_SECS + 1);
+        store.sweep(0, unix_now() + ISSUER_RETENTION_SECS + 1);
         assert_eq!(store.deletions(0, 10), (vec![], 0));
         // Cursors are never reused.
         let d = store.create_account(&new_hash(), T0).unwrap();

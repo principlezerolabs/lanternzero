@@ -1,13 +1,14 @@
 //! The server's own long-term keys: the VAPID signing key and the
-//! event-id secret (OHTTP keys are in [`crate::ohttp_keys`]), and helpers
-//! for owner-only files. These are server secrets, not user data, so they live
-//! in `data_dir` with owner-only permissions.
+//! event-id secret (OHTTP keys are in [`crate::ohttp_keys`]). These are
+//! server secrets, not user data, so they live in `data_dir` with
+//! owner-only permissions ([`crate::files`]).
 
 use std::io::Write;
 use std::path::Path;
 
 use zeroize::Zeroizing;
 
+use crate::files::{create_private_dir, private_file, read_files, write_private_atomic};
 use crate::webpush::Vapid;
 
 const VAPID_KEY_FILE: &str = "vapid-key";
@@ -26,46 +27,9 @@ pub enum KeyError {
     Ohttp(#[from] ohttp::Error),
 }
 
-/// Creates `dir` (and parents) readable only by the owner.
-pub fn create_private_dir(dir: &Path) -> std::io::Result<()> {
-    let mut b = std::fs::DirBuilder::new();
-    b.recursive(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::DirBuilderExt;
-        b.mode(0o700);
-    }
-    b.create(dir)
-}
-
-/// Open options for files only the owner may read (mode 0600 on Unix).
-pub fn private_file() -> std::fs::OpenOptions {
-    let mut opts = std::fs::OpenOptions::new();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        opts.mode(0o600);
-    }
-    opts
-}
-
-/// Replaces `dir/name` with `bytes` (mode 0600) through a temporary file
-/// and a rename, so a crash leaves the old or the new contents.
-pub fn write_private_atomic(dir: &Path, name: &str, bytes: &[u8]) -> std::io::Result<()> {
-    use std::io::Write as _;
-    let tmp = dir.join(format!("{name}.tmp"));
-    let mut f = private_file()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .open(&tmp)?;
-    f.write_all(bytes)?;
-    f.sync_all()?;
-    drop(f);
-    std::fs::rename(&tmp, dir.join(name))?;
-    #[cfg(unix)]
-    std::fs::File::open(dir)?.sync_all()?;
-    Ok(())
+/// Maps an I/O error on `label` (a path) to a [`KeyError`].
+pub(crate) fn io(label: &str) -> impl FnOnce(std::io::Error) -> KeyError + '_ {
+    move |e| KeyError::Io(label.to_owned(), e)
 }
 
 /// Reads a 32-byte secret from `name`, creating it from the OS RNG if absent.
@@ -92,10 +56,10 @@ fn load_or_create_secret(
                 .write(true)
                 .create_new(true)
                 .open(&path)
-                .map_err(|e| KeyError::Io(label.clone(), e))?;
+                .map_err(io(&label))?;
             f.write_all(&secret)
                 .and_then(|()| f.sync_all())
-                .map_err(|e| KeyError::Io(label, e))?;
+                .map_err(io(&label))?;
             Ok(secret)
         }
         Err(e) => Err(KeyError::Io(label, e)),
@@ -169,21 +133,9 @@ type RetiredFile = (String, Zeroizing<[u8; 32]>);
 /// Each retired key file and its secret.
 fn retired_vapid_files(dir: &Path) -> Result<Vec<RetiredFile>, KeyError> {
     let rdir = dir.join(VAPID_RETIRED_DIR);
-    let label = rdir.display().to_string();
-    let entries = match std::fs::read_dir(&rdir) {
-        Ok(e) => e,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(e) => return Err(KeyError::Io(label, e)),
-    };
     let mut out = Vec::new();
-    for entry in entries {
-        let path = entry.map_err(|e| KeyError::Io(label.clone(), e))?.path();
+    for (path, bytes) in read_files(&rdir).map_err(io(&rdir.display().to_string()))? {
         let name = path.display().to_string();
-        if path.extension().is_some_and(|x| x == "tmp") {
-            continue;
-        }
-        let bytes =
-            Zeroizing::new(std::fs::read(&path).map_err(|e| KeyError::Io(name.clone(), e))?);
         let raw: [u8; 32] = bytes
             .as_slice()
             .try_into()
@@ -200,14 +152,14 @@ fn retired_vapid_files(dir: &Path) -> Result<Vec<RetiredFile>, KeyError> {
 /// the devices bound to them. Pin devices to their key before calling
 /// ([`crate::store::Store::pin_vapid`]).
 pub fn rotate_vapid(dir: &Path, drop_old: bool) -> Result<String, KeyError> {
-    create_private_dir(dir).map_err(|e| KeyError::Io(dir.display().to_string(), e))?;
+    create_private_dir(dir).map_err(io(&dir.display().to_string()))?;
     let old = Zeroizing::new(load_or_create_secret(dir, VAPID_KEY_FILE, valid_vapid)?);
     let rdir = dir.join(VAPID_RETIRED_DIR);
     let rlabel = rdir.display().to_string();
-    create_private_dir(&rdir).map_err(|e| KeyError::Io(rlabel.clone(), e))?;
+    create_private_dir(&rdir).map_err(io(&rlabel))?;
     if drop_old {
         for (path, _) in retired_vapid_files(dir)? {
-            std::fs::remove_file(&path).map_err(|e| KeyError::Io(path, e))?;
+            std::fs::remove_file(&path).map_err(io(&path))?;
         }
     } else {
         let public = Vapid::from_secret(&old)
@@ -215,7 +167,7 @@ pub fn rotate_vapid(dir: &Path, drop_old: bool) -> Result<String, KeyError> {
             .public_b64;
         // Written before the current key is replaced, so a crash can't
         // lose it.
-        write_private_atomic(&rdir, &public, &old[..]).map_err(|e| KeyError::Io(rlabel, e))?;
+        write_private_atomic(&rdir, &public, &old[..]).map_err(io(&rlabel))?;
     }
     let mut new = Zeroizing::new([0u8; 32]);
     loop {
@@ -224,8 +176,7 @@ pub fn rotate_vapid(dir: &Path, drop_old: bool) -> Result<String, KeyError> {
             break;
         }
     }
-    write_private_atomic(dir, VAPID_KEY_FILE, &new[..])
-        .map_err(|e| KeyError::Io(VAPID_KEY_FILE.into(), e))?;
+    write_private_atomic(dir, VAPID_KEY_FILE, &new[..]).map_err(io(VAPID_KEY_FILE))?;
     Ok(Vapid::from_secret(&new)
         .map_err(|_| KeyError::Corrupt(VAPID_KEY_FILE.into()))?
         .public_b64)
@@ -238,7 +189,7 @@ pub fn prune_vapid(dir: &Path, in_use: &dyn Fn(&str) -> bool) -> Result<usize, K
     for (path, raw) in retired_vapid_files(dir)? {
         let key = Vapid::from_secret(&raw).map_err(|_| KeyError::Corrupt(path.clone()))?;
         if !in_use(&key.public_b64) {
-            std::fs::remove_file(&path).map_err(|e| KeyError::Io(path, e))?;
+            std::fs::remove_file(&path).map_err(io(&path))?;
             pruned += 1;
         }
     }
@@ -259,13 +210,8 @@ pub fn event_id_secret(dir: &Path) -> Result<Zeroizing<[u8; 32]>, KeyError> {
 mod tests {
     use super::*;
 
-    fn tmp() -> std::path::PathBuf {
-        let mut raw = [0u8; 8];
-        rand::fill(&mut raw);
-        let name: String = raw.iter().map(|b| format!("{b:02x}")).collect();
-        let d = std::env::temp_dir().join(format!("lz-keys-{name}"));
-        create_private_dir(&d).unwrap();
-        d
+    fn tmp() -> crate::files::TestDir {
+        crate::files::TestDir::new("keys")
     }
 
     #[test]

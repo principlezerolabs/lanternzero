@@ -221,7 +221,7 @@ mod tests {
     fn dir() -> std::path::PathBuf {
         let mut raw = [0u8; 8];
         rand::fill(&mut raw);
-        let name: String = raw.iter().map(|b| format!("{b:02x}")).collect();
+        let name = crate::hex(&raw);
         std::env::temp_dir().join(format!("lz-gw-keys-{name}"))
     }
 

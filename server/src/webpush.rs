@@ -28,8 +28,6 @@ pub enum WebPushError {
     TooLarge,
     #[error("invalid key")]
     Key,
-    #[error("malformed or unauthentic message")]
-    Decrypt,
 }
 
 /// Uncompressed SEC1 encoding (65 bytes) of a public key.
@@ -125,42 +123,6 @@ fn encrypt_with(
     Ok(out)
 }
 
-/// Decrypts a single-record RFC 8291 message. Wallets do this on the
-/// device; the server uses it only in tests.
-pub fn decrypt(
-    message: &[u8],
-    ua_secret: &SecretKey,
-    auth: &[u8; 16],
-) -> Result<Vec<u8>, WebPushError> {
-    if message.len() < 86 + TAG_LEN || message[20] != 65 {
-        return Err(WebPushError::Decrypt);
-    }
-    let salt: [u8; 16] = message[..16].try_into().expect("16 bytes");
-    let as_public_bytes: [u8; 65] = message[21..86].try_into().expect("65 bytes");
-    let as_public = PublicKey::from_sec1_bytes(&as_public_bytes).map_err(|_| WebPushError::Key)?;
-    let ua_bytes = uncompressed(&ua_secret.public_key());
-    let shared = p256::ecdh::diffie_hellman(ua_secret.to_nonzero_scalar(), as_public.as_affine());
-    let (cek, nonce) = derive(
-        auth,
-        shared.raw_secret_bytes(),
-        &ua_bytes,
-        &as_public_bytes,
-        &salt,
-    );
-    let cipher = Aes128Gcm::new_from_slice(&cek[..]).expect("16-byte key");
-    let mut record = cipher
-        .decrypt(&Nonce::from(nonce), &message[86..])
-        .map_err(|_| WebPushError::Decrypt)?;
-    // Strip padding back to the delimiter, which must be 0x02 (last record).
-    while record.last() == Some(&0) {
-        record.pop();
-    }
-    if record.pop() != Some(0x02) {
-        return Err(WebPushError::Decrypt);
-    }
-    Ok(record)
-}
-
 /// A VAPID signing key (RFC 8292).
 pub struct Vapid {
     key: SigningKey,
@@ -222,6 +184,12 @@ mod tests {
         URL_SAFE_NO_PAD.decode(s.replace(' ', "")).unwrap()
     }
 
+    /// Opens `msg` as a wallet does, with the client core's receiver.
+    fn decrypt(msg: &[u8], ua: &SecretKey, auth: &[u8; 16]) -> Option<Vec<u8>> {
+        let receiver = lz_client::PushReceiver::from_bytes(&ua.to_bytes().into(), auth).unwrap();
+        receiver.decrypt(msg).ok().map(|p| p.to_vec())
+    }
+
     /// RFC 8291 Appendix A, with its fixed keys and salt.
     #[test]
     fn matches_rfc8291_test_vector() {
@@ -257,10 +225,10 @@ mod tests {
         let auth = [7u8; 16];
         let mut msg = encrypt(b"ping", &ua.public_key(), &auth).unwrap();
         assert_eq!(decrypt(&msg, &ua, &auth).unwrap(), b"ping");
-        assert_eq!(decrypt(&msg, &ua, &[8u8; 16]), Err(WebPushError::Decrypt));
+        assert_eq!(decrypt(&msg, &ua, &[8u8; 16]), None);
         let last = msg.len() - 1;
         msg[last] ^= 1;
-        assert_eq!(decrypt(&msg, &ua, &auth), Err(WebPushError::Decrypt));
+        assert_eq!(decrypt(&msg, &ua, &auth), None);
         assert_eq!(
             encrypt(&[0u8; 4096], &ua.public_key(), &auth),
             Err(WebPushError::TooLarge)

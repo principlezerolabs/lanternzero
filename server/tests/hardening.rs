@@ -9,18 +9,15 @@ use std::process::{Command, Stdio};
 use std::sync::mpsc;
 use std::time::Duration;
 
+mod common;
+
 const BIN: &str = env!("CARGO_BIN_EXE_lz-server");
 const HOST: &str = "lz-doctor.example";
 /// Nothing listens here (the discard port), so the chain check fails fast.
 const LWD: &str = "http://127.0.0.1:9";
 
 fn temp_dir() -> PathBuf {
-    let mut raw = [0u8; 8];
-    rand::fill(&mut raw);
-    let name: String = raw.iter().map(|b| format!("{b:02x}")).collect();
-    let d = std::env::temp_dir().join(format!("lz-hardening-{name}"));
-    std::fs::create_dir_all(&d).unwrap();
-    d
+    common::temp_dir("hardening")
 }
 
 fn write_config(dir: &Path, allow_swap: bool) -> PathBuf {

@@ -19,15 +19,15 @@ use std::sync::Arc;
 use axum::Router;
 use axum::body::Bytes;
 use axum::extract::State;
-use axum::http::{StatusCode, header};
+use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use lz_proto::token::TokenHash;
-use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 use crate::AppState;
-use crate::api::{Problem, unix_secs};
+use crate::api::{Problem, json, parse};
+use crate::clock::unix_now;
 use crate::store::{
     AccountId, CreateError, GrantError, MAX_GRANT_KEY_LEN, MAX_GRANT_SECS, account_hex,
     parse_account,
@@ -123,11 +123,8 @@ pub fn bind(data_dir: &Path) -> std::io::Result<tokio::net::UnixListener> {
     // socket paths are limited to about 100 bytes.
     let mut raw = [0u8; 4];
     rand::fill(&mut raw);
-    let staging = data_dir.join(format!(
-        ".i{}",
-        raw.iter().map(|b| format!("{b:02x}")).collect::<String>()
-    ));
-    crate::keys::create_private_dir(&staging)?;
+    let staging = data_dir.join(format!(".i{}", lz_proto::hex::encode(&raw)));
+    crate::files::create_private_dir(&staging)?;
     let result = (|| {
         let staged = staging.join(SOCKET_FILE);
         let listener = tokio::net::UnixListener::bind(&staged)?;
@@ -137,19 +134,6 @@ pub fn bind(data_dir: &Path) -> std::io::Result<tokio::net::UnixListener> {
     })();
     let _ = std::fs::remove_dir_all(&staging);
     result
-}
-
-fn parse<T: DeserializeOwned>(body: &Bytes) -> Result<T, Problem> {
-    serde_json::from_slice(body).map_err(|_| Problem::bad_request("malformed JSON body"))
-}
-
-fn json<T: Serialize>(status: StatusCode, value: &T) -> Response {
-    (
-        status,
-        [(header::CONTENT_TYPE, "application/json")],
-        serde_json::to_vec(value).expect("response serializes"),
-    )
-        .into_response()
 }
 
 fn token_hash(s: &str) -> Result<TokenHash, Problem> {
@@ -170,15 +154,11 @@ fn live_account(state: &AppState, s: &str, now: u64) -> Result<AccountId, Proble
     }
 }
 
-fn now() -> u64 {
-    unix_secs(std::time::SystemTime::now())
-}
-
 /// `create {token_hash}`: a new account, live at once.
 async fn create(State(state): State<Arc<AppState>>, body: Bytes) -> Result<Response, Problem> {
     let req: TokenHashBody = parse(&body)?;
     let hash = token_hash(&req.token_hash)?;
-    match state.store.create_account(&hash, now()) {
+    match state.store.create_account(&hash, unix_now()) {
         Ok(account) => Ok(json(
             StatusCode::CREATED,
             &AccountAnswer {
@@ -202,7 +182,7 @@ async fn create(State(state): State<Arc<AppState>>, body: Bytes) -> Result<Respo
 async fn resolve(State(state): State<Arc<AppState>>, body: Bytes) -> Result<Response, Problem> {
     let req: TokenHashBody = parse(&body)?;
     let hash = token_hash(&req.token_hash)?;
-    let account = state.store.resolve_at(&hash, now());
+    let account = state.store.resolve_at(&hash, unix_now());
     Ok(json(
         StatusCode::OK,
         &AccountAnswer {
@@ -214,7 +194,7 @@ async fn resolve(State(state): State<Arc<AppState>>, body: Bytes) -> Result<Resp
 /// `scan_until {account}`: the scanning end time, or `null` if none is left.
 async fn scan_until(State(state): State<Arc<AppState>>, body: Bytes) -> Result<Response, Problem> {
     let req: AccountBody = parse(&body)?;
-    let now = now();
+    let now = unix_now();
     let account = live_account(&state, &req.account, now)?;
     Ok(json(
         StatusCode::OK,
@@ -236,7 +216,7 @@ async fn add_scan_time(
     if req.key.is_empty() || req.key.len() > MAX_GRANT_KEY_LEN {
         return Err(Problem::bad_request("key must be 1 to 128 bytes"));
     }
-    let now = now();
+    let now = unix_now();
     let account = live_account(&state, &req.account, now)?;
     match state.store.add_scan_time(account, req.secs, &req.key, now) {
         Ok(until) => Ok(json(StatusCode::OK, &UntilAnswer { until: Some(until) })),
@@ -270,7 +250,7 @@ async fn deletions(State(state): State<Arc<AppState>>, body: Bytes) -> Result<Re
 /// handling or refunds.
 async fn delete(State(state): State<Arc<AppState>>, body: Bytes) -> Result<Response, Problem> {
     let req: AccountBody = parse(&body)?;
-    let account = live_account(&state, &req.account, now())?;
+    let account = live_account(&state, &req.account, unix_now())?;
     if let Err(e) = state.delete_account(account) {
         tracing::error!(error = %e, "issuer: cannot delete an account");
         return Err(Problem::internal());

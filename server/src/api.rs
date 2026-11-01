@@ -16,6 +16,7 @@ use lz_proto::api::{
 };
 use lz_proto::lease::clamp_duration;
 use lz_proto::padding::RESPONSE_SIZE;
+use lz_proto::problem;
 use lz_proto::token::TokenHash;
 use rand::RngExt;
 use serde::Serialize;
@@ -23,6 +24,7 @@ use serde::de::DeserializeOwned;
 use zeroize::Zeroize;
 
 use crate::AppState;
+use crate::clock::unix_secs;
 use crate::config::ScanningPolicy;
 use crate::scanner::{FINALITY_DEPTH, Page};
 use crate::ssrf;
@@ -80,7 +82,7 @@ impl Problem {
             retry_after: Some(retry_after),
             ..Self::new(
                 StatusCode::TOO_MANY_REQUESTS,
-                "rate-limited",
+                problem::RATE_LIMITED,
                 "too many requests",
             )
         }
@@ -88,17 +90,17 @@ impl Problem {
     pub(crate) fn internal() -> Self {
         Self::new(
             StatusCode::INTERNAL_SERVER_ERROR,
-            "internal",
+            problem::INTERNAL,
             "internal error",
         )
     }
     pub(crate) fn bad_request(title: &'static str) -> Self {
-        Self::new(StatusCode::BAD_REQUEST, "bad-request", title)
+        Self::new(StatusCode::BAD_REQUEST, problem::BAD_REQUEST, title)
     }
     fn unauthorized() -> Self {
         Self::new(
             StatusCode::UNAUTHORIZED,
-            "unauthorized",
+            problem::UNAUTHORIZED,
             "missing or unknown account token",
         )
     }
@@ -117,7 +119,7 @@ struct ProblemBody {
 impl IntoResponse for Problem {
     fn into_response(self) -> Response {
         let body = ProblemBody {
-            kind: format!("https://lanternzero.com/problems/{}", self.slug),
+            kind: problem::type_uri(self.slug),
             title: self.title,
             status: self.status.as_u16(),
             min_seq: self.min_seq,
@@ -140,19 +142,19 @@ impl From<StoreError> for Problem {
         match e {
             StoreError::UnknownDevice => Self::new(
                 StatusCode::NOT_FOUND,
-                "unknown-device",
+                problem::UNKNOWN_DEVICE,
                 "unknown device; register again",
             ),
             StoreError::TooManyDevices => Self::new(
                 StatusCode::CONFLICT,
-                "too-many-devices",
+                problem::TOO_MANY_DEVICES,
                 "this account has the maximum number of devices",
             ),
             StoreError::StaleSeq { min_seq } => Self {
                 min_seq: Some(min_seq),
                 ..Self::new(
                     StatusCode::CONFLICT,
-                    "stale-seq",
+                    problem::STALE_SEQ,
                     "seq was already used or is too old",
                 )
             },
@@ -178,7 +180,7 @@ async fn require_date(req: Request, next: Next) -> Response {
     if !ok {
         return Problem::new(
             StatusCode::BAD_REQUEST,
-            "bad-date",
+            problem::BAD_DATE,
             "Date header missing or more than 60 s off",
         )
         .into_response();
@@ -211,10 +213,9 @@ fn authenticate_hash(
         .store
         .authenticate(&hash)
         .ok_or_else(Problem::unauthorized)?;
-    let key: String = account.iter().map(|b| format!("{b:02x}")).collect();
     state
         .account_limiter
-        .check(&key, SystemTime::now())
+        .check(&account, SystemTime::now())
         .map_err(Problem::rate_limited)?;
     Ok((account, hash))
 }
@@ -227,7 +228,7 @@ fn limit_device(state: &AppState, device_id: &str) -> Result<(), Problem> {
         .map_err(Problem::rate_limited)
 }
 
-fn parse<T: DeserializeOwned>(body: &Bytes) -> Result<T, Problem> {
+pub(crate) fn parse<T: DeserializeOwned>(body: &Bytes) -> Result<T, Problem> {
     serde_json::from_slice(body).map_err(|_| Problem::bad_request("malformed JSON body"))
 }
 
@@ -247,7 +248,7 @@ fn parse_zero<T: DeserializeOwned>(body: Bytes) -> Result<T, Problem> {
     }
 }
 
-fn json<T: Serialize>(status: StatusCode, value: &T) -> Response {
+pub(crate) fn json<T: Serialize>(status: StatusCode, value: &T) -> Response {
     (
         status,
         [(header::CONTENT_TYPE, "application/json")],
@@ -296,7 +297,7 @@ async fn register_device(
         Some(_) => {
             return Err(Problem::new(
                 StatusCode::BAD_REQUEST,
-                "unknown-vapid-key",
+                problem::UNKNOWN_VAPID_KEY,
                 "this server doesn't hold that VAPID key; read info again",
             ));
         }
@@ -355,14 +356,14 @@ async fn wake(
             if state.chain_source.is_none() {
                 return Err(Problem::new(
                     StatusCode::NOT_IMPLEMENTED,
-                    "scanning-unavailable",
+                    problem::SCANNING_UNAVAILABLE,
                     "this server does not offer scanning",
                 ));
             }
             if lease.spend_alerts {
                 return Err(Problem::new(
                     StatusCode::NOT_IMPLEMENTED,
-                    "spend-alerts-unavailable",
+                    problem::SPEND_ALERTS_UNAVAILABLE,
                     "this server does not offer spend alerts",
                 ));
             }
@@ -375,7 +376,7 @@ async fn wake(
                         state.scanner.end_lease(account);
                         return Err(Problem::new(
                             StatusCode::FORBIDDEN,
-                            "scanning-not-included",
+                            problem::SCANNING_NOT_INCLUDED,
                             "scanning is not part of this account",
                         ));
                     }
@@ -518,12 +519,6 @@ async fn delete_account(
         return Err(Problem::internal());
     }
     Ok(StatusCode::NO_CONTENT.into_response())
-}
-
-pub(crate) fn unix_secs(t: SystemTime) -> u64 {
-    t.duration_since(SystemTime::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
 }
 
 fn json_len<T: Serialize>(value: &T) -> usize {

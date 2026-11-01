@@ -17,8 +17,10 @@
 
 pub mod api;
 pub mod chain;
+pub mod clock;
 pub mod config;
 pub mod doctor;
+pub mod files;
 pub mod gateway;
 pub mod hardening;
 pub mod init;
@@ -36,6 +38,8 @@ pub mod webpush;
 
 use std::sync::Arc;
 
+use clock::unix_now;
+
 /// Shared server state.
 pub struct AppState {
     pub config: config::Config,
@@ -52,11 +56,11 @@ pub struct AppState {
     pub chain_source: Option<chain::Lightwalletd>,
     /// Leases, events, and hints. Memory only.
     pub scanner: scanner::Scanner,
-    pub account_limiter: limits::RateLimiter,
+    pub account_limiter: limits::RateLimiter<store::AccountId>,
     pub device_limiter: limits::RateLimiter,
     pub push_backoff: limits::PushBackoff,
     /// Instant payment pushes per account (spec §5.2).
-    pub payment_push_limiter: limits::RateLimiter,
+    pub payment_push_limiter: limits::RateLimiter<store::AccountId>,
 }
 
 impl std::fmt::Debug for AppState {
@@ -81,7 +85,7 @@ pub enum StartError {
 
 impl AppState {
     pub fn new(config: config::Config) -> Result<Arc<Self>, StartError> {
-        keys::create_private_dir(&config.data_dir)?;
+        files::create_private_dir(&config.data_dir)?;
         let now = unix_now();
         let pruned = ohttp_keys::prune(&config.data_dir, now)?;
         if pruned > 0 {
@@ -162,22 +166,11 @@ pub async fn account_sweep_loop(state: Arc<AppState>) {
     let mut tick = tokio::time::interval(std::time::Duration::from_secs(3600));
     loop {
         tick.tick().await;
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-        let deleted = state.sweep_accounts(now);
+        let deleted = state.sweep_accounts(unix_now());
         if deleted > 0 {
             tracing::info!(deleted, "deleted idle accounts");
         }
     }
-}
-
-pub(crate) fn unix_now() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
 }
 
 /// How often the server re-reads its OHTTP keys from disk.

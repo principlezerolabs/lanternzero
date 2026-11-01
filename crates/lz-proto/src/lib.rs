@@ -9,8 +9,10 @@
 
 pub mod api;
 pub mod event_id;
+pub mod hex;
 pub mod lease;
 pub mod padding;
+pub mod problem;
 pub mod replay;
 pub mod token;
 pub mod url;
@@ -21,3 +23,10 @@ pub const VERSION: &str = "v0";
 /// The purpose string a Lantern Zero OHTTP gateway declares to relays
 /// (spec §3.1).
 pub const OHTTP_PURPOSE: &str = "LanternZero v0 4bca76ac-1094-4330-97df-03d5c81b576d";
+
+/// Lowercase hex SHA-256 of an encoded OHTTP key configuration list, as
+/// `info` publishes it in `ohttp_key_config_sha256` (spec §3.2).
+pub fn key_config_sha256_hex(encoded: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    hex::encode(&Sha256::digest(encoded))
+}

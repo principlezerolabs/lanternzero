@@ -132,7 +132,13 @@ pub fn router(state: Arc<AppState>) -> Router {
         .with_state(state)
 }
 
-fn now_unix() -> u64 {
+/// Lowercase hex.
+pub(crate) fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// The current Unix time in seconds.
+pub fn now_unix() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -379,7 +385,7 @@ async fn push(
         Delivery::Delivered => {
             let mut id = [0u8; 12];
             rand::fill(&mut id);
-            let hex: String = id.iter().map(|b| format!("{b:02x}")).collect();
+            let hex = hex(&id);
             (
                 StatusCode::CREATED,
                 [(

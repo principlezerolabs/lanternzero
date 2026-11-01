@@ -156,10 +156,8 @@ async fn follower_tracks_the_real_tip() {
 }
 
 fn state() -> Arc<AppState> {
-    let mut raw = [0u8; 8];
-    rand::fill(&mut raw);
-    let name: String = raw.iter().map(|b| format!("{b:02x}")).collect();
-    let dir = std::env::temp_dir().join(format!("lz-regtest-{name}"));
+    // AppState::new creates the data directory itself, mode 0700.
+    let dir = common::temp_dir("regtest").join("data");
     AppState::new(Config {
         listen: "127.0.0.1:0".parse().unwrap(),
         public_host: "lz.test".into(),

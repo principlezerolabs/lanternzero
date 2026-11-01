@@ -123,7 +123,7 @@ impl Apns {
     }
 
     pub async fn send(&self, device_token: &[u8], push: &Push<'_>, now_unix: u64) -> Delivery {
-        let hex: String = device_token.iter().map(|b| format!("{b:02x}")).collect();
+        let hex = crate::hex(device_token);
         let lz = URL_SAFE_NO_PAD.encode(push.body);
         let (push_type, priority, payload) = match push.kind {
             Kind::Background => (

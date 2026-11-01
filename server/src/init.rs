@@ -317,7 +317,7 @@ pub fn render_config(
 /// Creates an account and returns its connection URL, holding the token.
 /// The server loads it at its next start.
 pub fn new_account_url(config: &Config) -> Result<Zeroizing<String>, InitError> {
-    crate::keys::create_private_dir(&config.data_dir)
+    crate::files::create_private_dir(&config.data_dir)
         .map_err(|e| InitError::Io("cannot create data_dir", e))?;
     let token = AccountToken::generate().map_err(|_| InitError::Token)?;
     Store::add_account_to_file(&config.data_dir, &token.hash())
@@ -352,15 +352,15 @@ pub fn run(config_path: &Path, opts: &InitOptions) -> Result<Zeroizing<String>, 
 
     // The server's own keys (spec §3.2, §5.3), created now so the first
     // start doesn't race anything.
-    crate::keys::create_private_dir(&data_dir)
+    crate::files::create_private_dir(&data_dir)
         .map_err(|e| InitError::Io("cannot create data_dir", e))?;
-    crate::ohttp_keys::load(&data_dir, crate::unix_now())?;
+    crate::ohttp_keys::load(&data_dir, crate::clock::unix_now())?;
     crate::keys::vapid_keys(&data_dir)?;
     crate::keys::event_id_secret(&data_dir)?;
 
-    crate::keys::create_private_dir(&parent)
+    crate::files::create_private_dir(&parent)
         .map_err(|e| InitError::Io("cannot create the config directory", e))?;
-    let mut f = crate::keys::private_file()
+    let mut f = crate::files::private_file()
         .write(true)
         .create_new(true)
         .open(config_path)
@@ -386,13 +386,8 @@ mod tests {
         s.split_whitespace().map(String::from).collect()
     }
 
-    fn tmp() -> PathBuf {
-        let mut raw = [0u8; 8];
-        rand::fill(&mut raw);
-        let name: String = raw.iter().map(|b| format!("{b:02x}")).collect();
-        let d = std::env::temp_dir().join(format!("lz-init-{name}"));
-        std::fs::create_dir_all(&d).unwrap();
-        d
+    fn tmp() -> crate::files::TestDir {
+        crate::files::TestDir::new("init")
     }
 
     fn onion_opts(dir: &Path) -> InitOptions {

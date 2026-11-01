@@ -11,7 +11,8 @@ use lz_server::push;
 use serde_json::{Value, json};
 
 use super::harness::{
-    Captured, HOST, Harness, Reply, global_logs, harness_accounts, problem_slug, receiver, ua_keys,
+    Captured, HOST, Harness, Reply, global_logs, harness_accounts, open_push, problem_slug,
+    receiver, ua_keys,
 };
 use crate::common::fake_lwd;
 use crate::common::wallet::{self, Wallet, action, block, sapling_output, tx};
@@ -196,7 +197,7 @@ async fn lease_live_match_long_poll_instant_push_and_ack() {
     assert_eq!(headers["urgency"], "high");
     assert_eq!(headers["ttl"], "86400");
     assert!(headers.get("topic").is_none());
-    let plain = lz_server::webpush::decrypt(&body, &s.push_keys.0, &s.push_keys.1).unwrap();
+    let plain = open_push(&body, &s.push_keys);
     assert_eq!(plain.len(), lz_proto::padding::PING_SIZE);
     let ping: Value = serde_json::from_slice(&plain).unwrap();
     assert_eq!(ping["t"], "payment");
@@ -309,7 +310,7 @@ async fn private_mode_events_ride_in_the_scheduled_ping() {
     push::wake_round(&s.h.state, Duration::ZERO).await;
     let (headers, body) = s.pushes.0.lock().unwrap().pop().unwrap();
     assert_eq!(headers["topic"], "wake");
-    let plain = lz_server::webpush::decrypt(&body, &s.push_keys.0, &s.push_keys.1).unwrap();
+    let plain = open_push(&body, &s.push_keys);
     assert_eq!(plain.len(), lz_proto::padding::PING_SIZE);
     let ping: Value = serde_json::from_slice(&plain).unwrap();
     assert_eq!(ping["t"], "wake");

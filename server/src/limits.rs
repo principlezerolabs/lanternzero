@@ -3,23 +3,26 @@
 //! OHTTP hides client IPs, so limits are per account and per device. Relays
 //! limit per IP.
 
+use std::borrow::Borrow;
 use std::collections::HashMap;
+use std::hash::Hash;
 use std::sync::Mutex;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime};
 
 /// Entries kept before stale windows are pruned.
 const PRUNE_AT: usize = 100_000;
 /// Longest `Retry-After` honored from a push gateway.
 const MAX_BACKOFF: Duration = Duration::from_secs(24 * 3600);
 
-/// A fixed one-minute window counter per key.
+/// A fixed one-minute window counter per key: an account id or a device
+/// id.
 #[derive(Debug)]
-pub struct RateLimiter {
+pub struct RateLimiter<K = String> {
     per_minute: u32,
-    windows: Mutex<HashMap<String, (u64, u32)>>,
+    windows: Mutex<HashMap<K, (u64, u32)>>,
 }
 
-impl RateLimiter {
+impl<K: Hash + Eq> RateLimiter<K> {
     pub fn new(per_minute: u32) -> Self {
         Self {
             per_minute,
@@ -29,8 +32,12 @@ impl RateLimiter {
 
     /// Counts one request for `key`. On `Err`, the caller should answer 429
     /// with `Retry-After` set to the returned seconds.
-    pub fn check(&self, key: &str, now: SystemTime) -> Result<(), u64> {
-        let secs = now.duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
+    pub fn check<Q>(&self, key: &Q, now: SystemTime) -> Result<(), u64>
+    where
+        K: Borrow<Q>,
+        Q: Hash + Eq + ToOwned<Owned = K> + ?Sized,
+    {
+        let secs = crate::clock::unix_secs(now);
         let minute = secs / 60;
         let mut w = self.windows.lock().expect("limiter lock");
         if w.len() >= PRUNE_AT {
@@ -98,6 +105,7 @@ pub fn parse_retry_after(value: &str, now: SystemTime) -> Option<Duration> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::UNIX_EPOCH;
 
     #[test]
     fn limits_per_key_per_minute() {

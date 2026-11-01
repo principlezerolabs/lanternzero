@@ -248,8 +248,7 @@ fn build_request(
         p256::PublicKey::from_sec1_bytes(&URL_SAFE_NO_PAD.decode(&device.p256dh).ok()?).ok()?;
     let auth: [u8; 16] = URL_SAFE_NO_PAD.decode(&device.auth).ok()?.try_into().ok()?;
     let body = crate::webpush::encrypt(plaintext, &ua_public, &auth).ok()?;
-    let expires =
-        SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_secs() + VAPID_VALIDITY.as_secs();
+    let expires = crate::clock::unix_now() + VAPID_VALIDITY.as_secs();
     // The key this device's subscription is bound to (spec §5.3).
     let vapid = match device.vapid.as_deref() {
         Some(k) => state.vapid.get(k)?,

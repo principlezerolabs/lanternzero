@@ -33,7 +33,7 @@ pub use live::{
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime};
 
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -107,7 +107,7 @@ struct Inner {
     unfinalized: Vec<(AccountId, String)>,
 }
 
-/// Scanner state, shared through [`AppState`].
+/// Scanner state, shared through [`crate::AppState`].
 pub struct Scanner {
     /// Server secret for event ids (spec §4.4).
     secret: Zeroizing<[u8; 32]>,
@@ -699,8 +699,9 @@ fn maybe_trim_events(inner: &mut Inner, account: AccountId) {
         dropped += 1;
     }
     if dropped > 0 {
-        let account_hex: String = account.iter().map(|b| format!("{b:02x}")).collect();
-        tracing::info!(account = %account_hex, dropped, "event cap discarded oldest events");
+        // No account id: it would tie that account to scanning mode in the
+        // logs (invariant 4).
+        tracing::info!(dropped, "event cap discarded oldest events");
     }
 }
 
@@ -734,7 +735,7 @@ fn json_len(event: &Event) -> usize {
 }
 
 fn rfc3339(t: SystemTime) -> String {
-    let secs = t.duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
+    let secs = crate::clock::unix_secs(t);
     time::OffsetDateTime::from_unix_timestamp(secs as i64)
         .ok()
         .and_then(|d| {

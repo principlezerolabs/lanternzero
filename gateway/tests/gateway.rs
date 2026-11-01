@@ -671,8 +671,10 @@ async fn server_wake_round_reaches_the_device_through_the_gateway() {
     let ciphertext = URL_SAFE_NO_PAD
         .decode(payload["lz"].as_str().unwrap())
         .unwrap();
-    let plain = lz_server::webpush::decrypt(&ciphertext, &device_secret, &auth).unwrap();
-    assert_eq!(plain, lz_server::push::wake_plaintext());
+    let receiver =
+        lz_client::PushReceiver::from_bytes(&device_secret.to_bytes().into(), &auth).unwrap();
+    let plain = receiver.decrypt(&ciphertext).unwrap();
+    assert_eq!(&plain[..], &lz_server::push::wake_plaintext()[..]);
 
     // A device Apple has forgotten is dropped by the server (spec §5.3).
     h.apns.reply(410, json!({ "reason": "Unregistered" }), None);

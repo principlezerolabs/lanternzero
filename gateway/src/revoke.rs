@@ -134,7 +134,7 @@ mod tests {
     fn survives_restarts_and_forgets_expired_entries() {
         let mut raw = [0u8; 8];
         rand::fill(&mut raw);
-        let name: String = raw.iter().map(|b| format!("{b:02x}")).collect();
+        let name = crate::hex(&raw);
         let d = std::env::temp_dir().join(format!("lz-gw-revoked-{name}"));
         let t = 1_800_000_000;
         let r = Revoked::open(&d, t).unwrap();

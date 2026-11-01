@@ -7,6 +7,7 @@ use lz_proto::api::{
     Info, LeaseStatus, PushKeys, SeqOnly, TokenRotate, WakeRequest, WakeResponse,
 };
 use lz_proto::lease::{LeaseRequest, Network};
+use lz_proto::problem;
 use lz_proto::replay::next_seq;
 use lz_proto::token::AccountToken;
 use lz_proto::url::ConnectionUrl;
@@ -25,7 +26,6 @@ pub const LONG_POLL_WAIT_SECS: u32 = 25;
 const MAX_ACKS: usize = 1024;
 /// Event states remembered for reporting only changes.
 const MAX_SEEN: usize = 4096;
-const PROBLEM_PREFIX: &str = "https://lanternzero.com/problems/";
 
 /// What the app persists between launches. Holds no secrets: the token
 /// stays in the connection URL, which belongs in the keychain.
@@ -566,13 +566,13 @@ impl Client {
         let p: Option<Problem> = serde_json::from_slice(&inner.body).ok();
         let slug: String = p
             .as_ref()
-            .and_then(|p| p.kind.strip_prefix(PROBLEM_PREFIX))
+            .and_then(|p| problem::slug(&p.kind))
             .unwrap_or("")
             .chars()
             .take(64)
             .collect();
         match (inner.status, slug.as_str()) {
-            (409, "stale-seq") => {
+            (409, problem::STALE_SEQ) => {
                 // Move past the window, so the retry is accepted.
                 if let Some(min) = p.and_then(|p| p.min_seq) {
                     let floor = min.saturating_sub(1);
@@ -581,19 +581,19 @@ impl Client {
                 }
                 Error::StaleSeq
             }
-            (404, "unknown-device") => {
+            (404, problem::UNKNOWN_DEVICE) => {
                 self.forget_device();
                 Error::UnknownDevice
             }
-            (409, "too-many-devices") => Error::TooManyDevices,
-            (400, "unknown-vapid-key") => Error::UnknownVapidKey,
+            (409, problem::TOO_MANY_DEVICES) => Error::TooManyDevices,
+            (400, problem::UNKNOWN_VAPID_KEY) => Error::UnknownVapidKey,
             (429, _) => Error::RateLimited {
                 retry_after_secs: inner.retry_after,
             },
             (401, _) => Error::Unauthorized,
-            (501, "scanning-unavailable") => Error::ScanningUnavailable,
-            (403, "scanning-not-included") => Error::ScanningNotIncluded,
-            (501, "spend-alerts-unavailable") => Error::SpendAlertsUnavailable,
+            (501, problem::SCANNING_UNAVAILABLE) => Error::ScanningUnavailable,
+            (403, problem::SCANNING_NOT_INCLUDED) => Error::ScanningNotIncluded,
+            (501, problem::SPEND_ALERTS_UNAVAILABLE) => Error::SpendAlertsUnavailable,
             (status, _) => Error::Server {
                 status,
                 problem: slug,
