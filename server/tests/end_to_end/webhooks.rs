@@ -133,6 +133,7 @@ async fn deliveries_are_signed_follow_each_change_and_end_when_final() {
     assert_eq!(d["pool"], "orchard");
     assert_eq!(d["amount"], 5_000);
     assert_eq!(d["memo"], Value::Null);
+    assert!(d.get("compact_tx").is_none(), "kept small, as in pushes");
     // Display order: the test txid is 32 bytes of 0xC1 either way, so
     // check only its form here.
     assert_eq!(d["txid"].as_str().unwrap().len(), 64);

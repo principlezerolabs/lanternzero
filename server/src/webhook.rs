@@ -53,7 +53,9 @@ pub fn deliver_due(state: &Arc<AppState>, limit: &Arc<Semaphore>, now: SystemTim
                     delivered,
                     SystemTime::now(),
                 );
-                if outcome == Outcome::Gone && state.store.delete_webhook(hook.account) {
+                if outcome == Outcome::Gone
+                    && state.store.delete_webhook_if(hook.account, &hook.secret)
+                {
                     state.scanner.clear_webhook_deliveries(hook.account);
                     tracing::info!("webhook answered 410 Gone; deleted it");
                 }

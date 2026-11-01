@@ -406,6 +406,23 @@ mod tests {
     }
 
     #[test]
+    fn a_late_410_for_a_replaced_webhook_keeps_the_new_one() {
+        use lz_proto::webhook::SigningSecret;
+        let dir = tmp();
+        let s = Store::open(&dir).unwrap();
+        let old = SigningSecret::from_bytes([1; 32]);
+        let new = SigningSecret::from_bytes([2; 32]);
+        s.set_webhook([7; 16], "https://a.example/hook", &old)
+            .unwrap();
+        s.set_webhook([7; 16], "https://b.example/hook", &new)
+            .unwrap();
+        assert!(!s.delete_webhook_if([7; 16], &old));
+        assert_eq!(s.webhooks()[0].url, "https://b.example/hook");
+        assert!(s.delete_webhook_if([7; 16], &new));
+        assert!(!s.has_webhook([7; 16]));
+    }
+
+    #[test]
     fn one_process_owns_the_data_directory() {
         let dir = tmp();
         let first = Store::open(&dir).unwrap();

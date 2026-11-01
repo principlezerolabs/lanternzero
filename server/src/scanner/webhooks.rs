@@ -125,7 +125,12 @@ impl Scanner {
                 event_id: e.id.clone(),
                 webhook_id: id,
                 body: WebhookDelivery {
-                    event: e.clone(),
+                    // Without `compact_tx`, as in push payloads: it can be
+                    // large, and the merchant fields say what it would.
+                    event: Event {
+                        compact_tx: None,
+                        ..e.clone()
+                    },
                     txid: txid_hex(&s.payment.txid),
                     pool: s.payment.pool,
                     amount: s.payment.value,

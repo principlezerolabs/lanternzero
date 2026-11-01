@@ -7,7 +7,7 @@ use base64::Engine as _;
 use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
 use hmac::{Hmac, Mac};
 use sha2::{Digest, Sha256};
-use zeroize::{Zeroize, Zeroizing};
+use zeroize::Zeroizing;
 
 use crate::api::EventStatus;
 
@@ -81,9 +81,8 @@ impl SigningSecret {
     /// Parses [`encode`](Self::encode)'s form.
     pub fn parse(text: &str) -> Option<Self> {
         let b64 = text.strip_prefix(SECRET_PREFIX)?;
-        let mut bytes = Zeroizing::new(STANDARD.decode(b64).ok()?);
+        let bytes = Zeroizing::new(STANDARD.decode(b64).ok()?);
         let raw: [u8; SECRET_LEN] = bytes.as_slice().try_into().ok()?;
-        bytes.zeroize();
         Some(Self::from_bytes(raw))
     }
 }

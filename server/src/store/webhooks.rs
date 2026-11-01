@@ -66,6 +66,26 @@ impl Store {
         removed
     }
 
+    /// Removes the account's webhook only if it still has this secret: a
+    /// `410` from a URL the account has since replaced must not delete the
+    /// new one. Returns whether it removed it.
+    pub fn delete_webhook_if(&self, account: AccountId, secret: &SigningSecret) -> bool {
+        let id = hex(&account);
+        let removed = {
+            let mut st = self.state.lock().expect("store lock");
+            let same = st
+                .webhooks
+                .get(&id)
+                .and_then(|w| SigningSecret::parse(&w.secret))
+                .is_some_and(|s| &s == secret);
+            same && st.webhooks.remove(&id).is_some()
+        };
+        if removed {
+            self.flush_now();
+        }
+        removed
+    }
+
     /// Every account's webhook.
     pub fn webhooks(&self) -> Vec<Webhook> {
         let st = self.state.lock().expect("store lock");

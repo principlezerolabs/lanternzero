@@ -10,8 +10,8 @@ use zcash_note_encryption::batch::try_compact_note_decryption;
 use crate::store::AccountId;
 use crate::viewkey::ScanKeys;
 
-/// One trial-decryption hit.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// One trial-decryption hit. `Debug` hides the value.
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub struct Match {
     pub account: AccountId,
     /// Position of the transaction in `CompactBlock::vtx`.
@@ -22,6 +22,16 @@ pub struct Match {
     /// The note's value in zatoshis, for webhooks (spec §4.5). Derived
     /// from a key: memory only (invariant 3).
     pub value: u64,
+}
+
+impl std::fmt::Debug for Match {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Match")
+            .field("tx", &self.tx)
+            .field("pool", &self.pool)
+            .field("index", &self.index)
+            .finish_non_exhaustive()
+    }
 }
 
 /// Trial-decrypts every shielded output in `block` with each lease's keys.
