@@ -69,7 +69,7 @@ jobs:
         run: docker compose -f deploy/regtest/compose.yaml down
 
   # Canary: the same tests on a regtest chain that activates NU7 at height
-  # 10. Zaino 0.10.x can't parse NU7 blocks yet (deploy/regtest/README.md),
+  # 10. Zaino 0.10.x can't parse NU7 blocks yet (zingolabs/zaino#1731),
   # so this is allowed to fail; it turns green once a fixed Zaino is pinned.
   regtest-nu7:
     runs-on: ubuntu-latest

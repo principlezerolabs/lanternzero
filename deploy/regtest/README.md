@@ -34,9 +34,12 @@ LZ_REGTEST_NU7=1 cargo test -p lz-server --test regtest -- --ignored --test-thre
 ```
 
 **Known failure (2026-11-01):** Zaino 0.10.1 and 0.10.2 stop at the last
-pre-NU7 block, logging `invalid consensus branch id`. They depend on
-`zcash_protocol` 0.10, where NU7's branch id is still a placeholder
-(`0xffff_ffff`); the real id, `0x77190ad9`, arrived in 0.11. Zebra 7.0.0
+pre-NU7 block, logging `invalid consensus branch id`
+([zingolabs/zaino#1731](https://github.com/zingolabs/zaino/issues/1731)).
+Their `zebra-chain` 12 parses transaction headers against an upgrade table
+that still lists NU7 as a placeholder (`0xfffffffe`), and their
+`zcash_protocol` 0.10 has one too. The real id, `0x77190ad9`, arrived in
+`zebra-chain` 15 (Zebra 7.0.0) and `zcash_protocol` 0.11. Zebra 7.0.0
 handles the upgrade, and so does our server: its follower just sees the tip
 stop, and warns after 10 minutes. A CI canary job (`regtest-nu7`, allowed to
 fail) runs this test, so a fixed Zaino shows up as soon as it's pinned here.
