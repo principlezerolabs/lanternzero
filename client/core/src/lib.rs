@@ -38,8 +38,9 @@ pub mod push;
 pub mod transport;
 
 pub use client::{
-    Client, ClientState, InfoOutcome, LONG_POLL_WAIT_SECS, PendingEvents, PendingInfo,
-    PendingRegister, PendingUnregister, PendingWake, PollOutcome, WakeOutcome,
+    Client, ClientState, InfoOutcome, LONG_POLL_WAIT_SECS, PendingDeleteAccount, PendingEvents,
+    PendingInfo, PendingRegister, PendingRotate, PendingUnregister, PendingWake, PollOutcome,
+    WakeOutcome,
 };
 pub use lz_proto;
 pub use push::{PushError, PushReceiver};

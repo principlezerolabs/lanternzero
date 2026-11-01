@@ -592,3 +592,86 @@ fn onion_requests_go_direct_and_secrets_stay_out_of_debug() {
         Error::TooLarge
     );
 }
+
+#[test]
+fn rotates_to_a_token_the_app_stored_first() {
+    let gw = Gateway::new(1);
+    let mut c = registered(&gw);
+    let new = AccountToken::from_bytes([0x6B; 32]);
+    let new_text = new.encode().to_string();
+    let p = c.rotate_token(NOW, &new).unwrap();
+    // The app keeps this before sending (spec §4.6).
+    let stored = p.new_connection_url();
+    assert_eq!(*stored, format!("lanternzero://lz.example/base#{new_text}"));
+    assert!(!format!("{p:?}").contains(&new_text[4..]), "token in Debug");
+
+    let seen = gw.receive(p.request());
+    assert_eq!(seen.path, "/base/v0/token/rotate");
+    // Sent with the old token, carrying only the new one's hash.
+    assert_eq!(
+        seen.header("authorization").map(str::to_owned),
+        Some(format!("Bearer {}", &*token().encode()))
+    );
+    assert_eq!(
+        seen.body["new_token_hash"],
+        AccountToken::from_bytes([0x6B; 32]).hash().to_hex()
+    );
+    let reply = seen.answer(204, &Value::Null, None);
+    assert_eq!(c.finish_rotate(p, ok(&reply)).unwrap(), stored);
+
+    // Later requests use the new token.
+    let seen = gw.receive(c.wake(NOW, None).unwrap().request());
+    assert_eq!(
+        seen.header("authorization").map(str::to_owned),
+        Some(format!("Bearer {new_text}"))
+    );
+    assert_eq!(c.connection().to_url(), stored);
+}
+
+#[test]
+fn a_failed_rotation_keeps_the_old_token() {
+    let gw = Gateway::new(1);
+    let mut c = registered(&gw);
+    let new = AccountToken::from_bytes([0x6B; 32]);
+    let p = c.rotate_token(NOW, &new).unwrap();
+    let reply = gw
+        .receive(p.request())
+        .answer(400, &problem("bad-request", 400), None);
+    assert!(matches!(
+        c.finish_rotate(p, ok(&reply)),
+        Err(Error::Server { status: 400, .. })
+    ));
+    // The app still holds `new` and can send the rotation again.
+    let seen = gw.receive(c.rotate_token(NOW, &new).unwrap().request());
+    assert_eq!(seen.body["new_token_hash"], new.hash().to_hex());
+    let seen = gw.receive(c.wake(NOW, None).unwrap().request());
+    assert_eq!(
+        seen.header("authorization").map(str::to_owned),
+        Some(format!("Bearer {}", &*token().encode()))
+    );
+}
+
+#[test]
+fn deleting_the_account_clears_the_client() {
+    let gw = Gateway::new(1);
+    let mut c = registered(&gw);
+    let p = c.wake(NOW, None).unwrap();
+    let reply = gw
+        .receive(p.request())
+        .answer(200, &wake_reply(vec![], false), None);
+    c.finish_wake(p, ok(&reply)).unwrap();
+
+    let p = c.delete_account(NOW).unwrap();
+    let seen = gw.receive(p.request());
+    assert_eq!(
+        (seen.method.as_str(), seen.path.as_str()),
+        ("DELETE", "/base/v0/account")
+    );
+    assert!(seen.body["seq"].is_u64());
+    let reply = seen.answer(204, &Value::Null, None);
+    c.finish_delete_account(p, ok(&reply)).unwrap();
+    assert_eq!(c.state().device_id, None);
+    assert_eq!(c.state().cursor, None);
+    assert!(c.state().last_seq.is_some(), "seq keeps rising");
+    assert_eq!(c.wake(NOW, None).unwrap_err(), Error::NotRegistered);
+}

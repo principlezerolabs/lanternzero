@@ -232,3 +232,113 @@ async fn a_wallet_session_through_the_client_core() {
     // Invariant 4: every request looked the same to the relay.
     assert!(sizes.iter().all(|&s| s == sizes[0]), "{sizes:?}");
 }
+
+#[tokio::test]
+async fn token_rotation_and_account_deletion_through_the_client_core() {
+    use lz_proto::token::AccountToken;
+    let chain = fake_lwd::genesis();
+    chain.lock().unwrap().build(1, 100, 1);
+    let url = fake_lwd::serve(chain.clone()).await;
+    let h = harness_full(true, LimitsConfig::default(), Some(url));
+    sync_tip(&h).await;
+    let config = KeyConfig::from_two_relays(&h.key_config().await, &h.key_config().await).unwrap();
+    let account = h
+        .state
+        .store
+        .authenticate(&TokenHash::of_text(&h.token))
+        .unwrap();
+    let client = |url: &str, state: ClientState| {
+        Client::new(
+            ConnectionUrl::parse(url).unwrap(),
+            Network::Main,
+            Transport::Ohttp(config.clone()),
+            state,
+        )
+        .unwrap()
+    };
+    let old_url = connection(&h).to_url().to_string();
+    let mut c = client(&old_url, ClientState::default());
+    let mut sizes = Vec::new();
+
+    let p = c
+        .register(
+            now_ms(),
+            "https://push.example-wallet.app/wp/abc",
+            PushReceiver::generate().unwrap().push_keys(),
+        )
+        .unwrap();
+    let r = relay(&h, p.request()).await;
+    c.finish_register(p, reply(&r)).unwrap();
+    let alice = Wallet::new(1);
+    let lease = || LeaseRequest {
+        keys: vec![ViewingKey::new(alice.uivk_main())],
+        from_height: 95,
+        duration_secs: 604_800,
+        spend_alerts: false,
+        alert_mode: AlertMode::Instant,
+    };
+    let p = c.wake(now_ms(), Some(lease())).unwrap();
+    sizes.push(p.request().body.len());
+    let r = relay(&h, p.request()).await;
+    assert!(c.finish_wake(p, reply(&r)).unwrap().lease.active);
+
+    // Rotate. Another copy of the app still has the old token.
+    let mut old = client(&old_url, c.state().clone());
+    let p = c
+        .rotate_token(now_ms(), &AccountToken::generate().unwrap())
+        .unwrap();
+    sizes.push(p.request().body.len());
+    let new_url = p.new_connection_url().to_string();
+    let r = relay(&h, p.request()).await;
+    assert_eq!(*c.finish_rotate(p, reply(&r)).unwrap(), new_url);
+    assert_ne!(new_url, old_url);
+
+    // The old token works until the new one is first used, then stops.
+    let p = old.wake(now_ms(), Some(lease())).unwrap();
+    let r = relay(&h, p.request()).await;
+    assert!(old.finish_wake(p, reply(&r)).is_ok());
+    let p = c.wake(now_ms(), Some(lease())).unwrap();
+    let r = relay(&h, p.request()).await;
+    let w = c.finish_wake(p, reply(&r)).unwrap();
+    assert!(
+        w.lease.active,
+        "the account, its device, and its lease carried over"
+    );
+    let p = old.wake(now_ms(), Some(lease())).unwrap();
+    let r = relay(&h, p.request()).await;
+    assert_eq!(old.finish_wake(p, reply(&r)), Err(Error::Unauthorized));
+
+    // Delete the account: everything goes at once, and the token stops.
+    assert!(h.state.scanner.has_lease(account));
+    let p = c.delete_account(now_ms()).unwrap();
+    sizes.push(p.request().body.len());
+    let r = relay(&h, p.request()).await;
+    c.finish_delete_account(p, reply(&r)).unwrap();
+    assert!(!h.state.scanner.has_lease(account));
+    assert!(h.state.store.devices().is_empty());
+    assert!(!h.state.store.has_account(account));
+    let mut after = client(&new_url, ClientState::default());
+    let p = after
+        .register(
+            now_ms(),
+            "https://push.example-wallet.app/wp/def",
+            PushReceiver::generate().unwrap().push_keys(),
+        )
+        .unwrap();
+    let r = relay(&h, p.request()).await;
+    assert_eq!(
+        after.finish_register(p, reply(&r)),
+        Err(Error::Unauthorized)
+    );
+    let accounts = std::fs::read_to_string(
+        h.state
+            .config
+            .data_dir
+            .join(lz_server::store::ACCOUNTS_FILE),
+    )
+    .unwrap();
+    assert!(accounts.trim().is_empty(), "{accounts}");
+
+    // Invariant 4: account actions look like every other request.
+    assert!(sizes.iter().all(|&s| s == sizes[0]), "{sizes:?}");
+}

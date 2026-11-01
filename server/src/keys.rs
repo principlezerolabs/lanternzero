@@ -50,6 +50,25 @@ pub fn private_file() -> std::fs::OpenOptions {
     opts
 }
 
+/// Replaces `dir/name` with `bytes` (mode 0600) through a temporary file
+/// and a rename, so a crash leaves the old or the new contents.
+pub fn write_private_atomic(dir: &Path, name: &str, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write as _;
+    let tmp = dir.join(format!("{name}.tmp"));
+    let mut f = private_file()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(&tmp)?;
+    f.write_all(bytes)?;
+    f.sync_all()?;
+    drop(f);
+    std::fs::rename(&tmp, dir.join(name))?;
+    #[cfg(unix)]
+    std::fs::File::open(dir)?.sync_all()?;
+    Ok(())
+}
+
 /// Reads a 32-byte secret from `name`, creating it from the OS RNG if absent.
 /// `valid` rejects random values that aren't usable keys, so a new one is
 /// drawn (for P-256, about one value in 2^32 is out of range).

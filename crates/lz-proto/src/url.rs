@@ -86,6 +86,23 @@ impl ConnectionUrl {
         let rest = self.base_url.split_once("://").map_or("", |(_, r)| r);
         format!("lanternzero://{rest}#lzt_…{tail}")
     }
+
+    /// The whole URL, token included, in the scheme form: for the keychain,
+    /// or to show once after a rotation (spec §4.6). Never log it.
+    pub fn to_url(&self) -> zeroize::Zeroizing<String> {
+        let rest = self.base_url.split_once("://").map_or("", |(_, r)| r);
+        zeroize::Zeroizing::new(format!("lanternzero://{rest}#{}", &*self.token.encode()))
+    }
+
+    /// The same server with another token (after a rotation).
+    pub fn with_token(&self, token: AccountToken) -> Self {
+        Self {
+            base_url: self.base_url.clone(),
+            host: self.host.clone(),
+            onion: self.onion,
+            token,
+        }
+    }
 }
 
 fn strip_prefix_ignore_case<'a>(s: &'a str, prefix: &str) -> Option<&'a str> {
@@ -100,6 +117,26 @@ mod tests {
 
     fn tok() -> String {
         AccountToken::from_bytes([9; 32]).encode().to_string()
+    }
+
+    #[test]
+    fn formats_back_to_a_url_that_parses_the_same() {
+        for input in [
+            format!("LanternZero://lz.example:8443/base/#{}", tok()),
+            format!("https://abcdefgh.onion/lz#{}", tok()),
+        ] {
+            let u = ConnectionUrl::parse(&input).unwrap();
+            let back = ConnectionUrl::parse(&u.to_url()).unwrap();
+            assert_eq!(
+                (back.base_url.as_str(), back.onion),
+                (u.base_url.as_str(), u.onion)
+            );
+            assert_eq!(back.token.encode(), u.token.encode());
+        }
+        let u = ConnectionUrl::parse(&format!("lanternzero://lz.example#{}", tok())).unwrap();
+        let other = u.with_token(AccountToken::from_bytes([7; 32]));
+        assert_eq!(other.base_url, u.base_url);
+        assert_ne!(other.token.encode(), u.token.encode());
     }
 
     #[test]

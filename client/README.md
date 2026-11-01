@@ -32,6 +32,7 @@ builds on Rust 1.89, librustzcash's own minimum.
 | §4.2 | `wake`, with or without a lease. Leases are checked first: no full viewing key without spend alerts |
 | §4.3 | The long-poll: `poll` uses a 25 s `wait`, or `wait: 0` when the last response said more events are waiting |
 | §4.4 | Acknowledgements ride on the next request and stay queued until one succeeds. Only `mined` events are acknowledged |
+| §4.6 | `rotate_token` to a token the app generated and stored first; `finish_rotate` switches to it and returns the new connection URL. `delete_account` clears the client |
 | §4.7 | `info`: network and version checks; reports when the server's VAPID key changed |
 | §5 | `PushReceiver`: the device's RFC 8291 keys, and opening a fixed-size ping (checked against the RFC 8291 example) |
 
@@ -56,8 +57,7 @@ only when they change.
 
 ## Not yet
 
-- Token rotation, account deletion, and webhooks: the server doesn't have
-  them yet either.
+- Webhooks: the server doesn't have them yet either.
 - An optional `reqwest` feature that sends requests itself, for merchant
   backends.
 - Choosing relays. Relay addressing differs between relay software

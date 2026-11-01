@@ -12,7 +12,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, post};
 use lz_proto::api::{
     DeviceRegistered, DeviceRegistration, EventsRequest, EventsResponse, Info, SeqOnly,
-    WakeRequest, WakeResponse,
+    TokenRotate, WakeRequest, WakeResponse,
 };
 use lz_proto::lease::clamp_duration;
 use lz_proto::padding::RESPONSE_SIZE;
@@ -25,7 +25,7 @@ use zeroize::Zeroize;
 use crate::AppState;
 use crate::scanner::{FINALITY_DEPTH, Page};
 use crate::ssrf;
-use crate::store::{AccountId, StoreError};
+use crate::store::{AccountId, RotateError, StoreError};
 use crate::viewkey::ScanKeys;
 
 /// Largest clock difference accepted in an inner request's `Date` (spec §3.4).
@@ -48,6 +48,8 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v0/devices/{device_id}", delete(delete_device))
         .route("/v0/wake", post(wake))
         .route("/v0/events", post(events))
+        .route("/v0/token/rotate", post(rotate_token))
+        .route("/v0/account", delete(delete_account))
         .layer(middleware::from_fn(require_date))
         .with_state(state)
 }
@@ -180,6 +182,14 @@ async fn require_date(req: Request, next: Next) -> Response {
 /// limit. Hashes the header text without keeping it; never logs either
 /// (invariant 6). The auth scheme is case-insensitive (RFC 9110 §11.1).
 fn authenticate(state: &AppState, headers: &HeaderMap) -> Result<AccountId, Problem> {
+    authenticate_hash(state, headers).map(|(account, _)| account)
+}
+
+/// [`authenticate`], also returning the presented token's hash.
+fn authenticate_hash(
+    state: &AppState,
+    headers: &HeaderMap,
+) -> Result<(AccountId, TokenHash), Problem> {
     let value = headers
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
@@ -188,16 +198,17 @@ fn authenticate(state: &AppState, headers: &HeaderMap) -> Result<AccountId, Prob
     if !scheme.eq_ignore_ascii_case("bearer") {
         return Err(Problem::unauthorized());
     }
+    let hash = TokenHash::of_text(text.trim());
     let account = state
         .store
-        .authenticate(&TokenHash::of_text(text.trim()))
+        .authenticate(&hash)
         .ok_or_else(Problem::unauthorized)?;
     let key: String = account.iter().map(|b| format!("{b:02x}")).collect();
     state
         .account_limiter
         .check(&key, SystemTime::now())
         .map_err(Problem::rate_limited)?;
-    Ok(account)
+    Ok((account, hash))
 }
 
 /// Applies the per-device rate limit.
@@ -337,6 +348,12 @@ async fn wake(
             {
                 tokio::spawn(crate::scanner::backfill(state.clone(), bf));
             }
+            // The account was deleted while this request was in flight: a
+            // lease must not outlive it (spec §4.6).
+            if !state.store.has_account(account) {
+                state.scanner.end_lease(account);
+                return Err(Problem::unauthorized());
+            }
         }
     }
     drop(req);
@@ -416,6 +433,59 @@ async fn events(
     resp.cursor = page.cursor.to_string();
     resp.next = page.more.then(|| page.cursor.to_string());
     Ok(json(StatusCode::OK, &resp))
+}
+
+/// `POST /v0/token/rotate` (spec §4.6). The presented token keeps working
+/// until the new one is first used, or for 24 hours.
+async fn rotate_token(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Response, Problem> {
+    let (account, presented) = authenticate_hash(&state, &headers)?;
+    let req: TokenRotate = parse(&body)?;
+    state.store.accept_account_seq(account, req.seq)?;
+    let new = TokenHash::from_hex(&req.new_token_hash)
+        .ok_or_else(|| Problem::bad_request("invalid new_token_hash"))?;
+    let now = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    match state.store.rotate_token(account, &presented, &new, now) {
+        Ok(()) => Ok(StatusCode::NO_CONTENT.into_response()),
+        // Says nothing about whose token it is.
+        Err(RotateError::InUse) => Err(Problem::bad_request("new_token_hash cannot be used")),
+        Err(RotateError::Io(e)) => {
+            tracing::error!(error = %e, "cannot rotate a token");
+            Err(Problem::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal",
+                "internal error",
+            ))
+        }
+    }
+}
+
+/// `DELETE /v0/account` (spec §4.6): drops the token hashes, devices,
+/// lease, events, and hints at once.
+async fn delete_account(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Response, Problem> {
+    let account = authenticate(&state, &headers)?;
+    let SeqOnly { seq } = parse(&body)?;
+    state.store.accept_account_seq(account, seq)?;
+    if let Err(e) = state.store.delete_account(account) {
+        tracing::error!(error = %e, "cannot delete an account");
+        return Err(Problem::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal",
+            "internal error",
+        ));
+    }
+    state.scanner.end_lease(account);
+    Ok(StatusCode::NO_CONTENT.into_response())
 }
 
 fn json_len<T: Serialize>(value: &T) -> usize {

@@ -4,10 +4,11 @@ use std::collections::HashMap;
 
 use lz_proto::api::{
     DeviceRegistered, DeviceRegistration, Event, EventStatus, EventsRequest, EventsResponse, Hint,
-    Info, LeaseStatus, PushKeys, SeqOnly, WakeRequest, WakeResponse,
+    Info, LeaseStatus, PushKeys, SeqOnly, TokenRotate, WakeRequest, WakeResponse,
 };
 use lz_proto::lease::{LeaseRequest, Network};
 use lz_proto::replay::next_seq;
+use lz_proto::token::AccountToken;
 use lz_proto::url::ConnectionUrl;
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
@@ -100,6 +101,14 @@ pending!(
     PendingUnregister
 );
 pending!(
+    /// A token rotation in flight.
+    PendingRotate { new_url: ConnectionUrl }
+);
+pending!(
+    /// An account deletion in flight.
+    PendingDeleteAccount
+);
+pending!(
     /// A `wake` in flight.
     PendingWake { acks: Vec<String> }
 );
@@ -107,6 +116,15 @@ pending!(
     /// An `events` long-poll (or `next` page fetch) in flight.
     PendingEvents { acks: Vec<String> }
 );
+
+impl PendingRotate {
+    /// The connection URL with the new token. Spec §4.6: store it (in the
+    /// keychain) before sending, so a crash after the server accepts the
+    /// rotation can't lose it.
+    pub fn new_connection_url(&self) -> Zeroizing<String> {
+        self.new_url.to_url()
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InfoOutcome {
@@ -401,6 +419,70 @@ impl Client {
             events: self.fresh(resp.events),
             more: self.more,
         })
+    }
+
+    /// `POST /v0/token/rotate` (spec §4.6) to `new_token`, which the app
+    /// generates with [`AccountToken::generate`] and stores first. After a
+    /// lost response or an error such as [`Error::StaleSeq`], send again
+    /// with the same token: the old one keeps working until the new one is
+    /// first used, or for 24 hours.
+    pub fn rotate_token(
+        &mut self,
+        now_unix_ms: u64,
+        new_token: &AccountToken,
+    ) -> Result<PendingRotate, Error> {
+        // AccountToken isn't Clone; copy it through its text form.
+        let new_token = AccountToken::parse(&new_token.encode()).map_err(|_| Error::Malformed)?;
+        let body = to_json(&TokenRotate {
+            seq: self.seq(now_unix_ms),
+            new_token_hash: new_token.hash().to_hex(),
+        })?;
+        let ex = self.exchange("POST", "/v0/token/rotate", true, now_unix_ms, Some(&body))?;
+        Ok(PendingRotate {
+            ex,
+            new_url: self.url.with_token(new_token),
+        })
+    }
+
+    /// Switches to the new token and returns the new connection URL, to
+    /// store and to show the user once.
+    pub fn finish_rotate(
+        &mut self,
+        pending: PendingRotate,
+        response: HttpResponse<'_>,
+    ) -> Result<Zeroizing<String>, Error> {
+        self.open(pending.ex, response, 204)?;
+        let url = pending.new_url.to_url();
+        self.url = pending.new_url;
+        Ok(url)
+    }
+
+    /// `DELETE /v0/account` (spec §4.6): the server drops everything about
+    /// the account at once.
+    pub fn delete_account(&mut self, now_unix_ms: u64) -> Result<PendingDeleteAccount, Error> {
+        let body = to_json(&SeqOnly {
+            seq: self.seq(now_unix_ms),
+        })?;
+        let ex = self.exchange("DELETE", "/v0/account", true, now_unix_ms, Some(&body))?;
+        Ok(PendingDeleteAccount { ex })
+    }
+
+    /// Clears this client's state; the token no longer works. The app
+    /// deletes the connection URL and revokes its gateway subscription.
+    pub fn finish_delete_account(
+        &mut self,
+        pending: PendingDeleteAccount,
+        response: HttpResponse<'_>,
+    ) -> Result<(), Error> {
+        self.open(pending.ex, response, 204)?;
+        self.state = ClientState {
+            last_seq: self.state.last_seq,
+            ..ClientState::default()
+        };
+        self.more = false;
+        self.acks.clear();
+        self.seen.clear();
+        Ok(())
     }
 
     fn device_id(&self) -> Result<&str, Error> {

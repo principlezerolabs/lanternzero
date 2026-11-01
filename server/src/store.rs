@@ -5,8 +5,14 @@
 //! module (invariants 1 and 3).
 //!
 //! Accounts come from `accounts.txt` in the data directory: one
-//! `<token-sha256-hex> <account-id-hex>` per line. Devices and replay windows
-//! are kept in `state.json`.
+//! `<token-sha256-hex> <account-id-hex> [<valid-until-unix>]` per line. The
+//! third field marks a token replaced by rotation, still accepted until then
+//! (spec §4.6). Devices and replay windows are kept in `state.json`.
+//!
+//! The server rewrites `accounts.txt` on rotation and deletion, and
+//! `new-account` appends to it, both under a lock on `accounts.lock`. The
+//! server re-reads the file before each rewrite, so accounts added while it
+//! runs are kept (they load at the next start).
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -20,7 +26,11 @@ use lz_proto::token::TokenHash;
 use serde::{Deserialize, Serialize};
 
 pub const ACCOUNTS_FILE: &str = "accounts.txt";
+const ACCOUNTS_LOCK: &str = "accounts.lock";
 const STATE_FILE: &str = "state.json";
+/// How long a rotated-out token keeps working if the new one isn't used
+/// (spec §4.6).
+pub const ROTATION_GRACE_SECS: u64 = 24 * 3600;
 
 pub type AccountId = [u8; 16];
 
@@ -51,6 +61,72 @@ struct State {
     account_seq: HashMap<String, SeqWindow>,
 }
 
+/// One token hash of an account (a line of `accounts.txt`).
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct Entry {
+    hash: [u8; 32],
+    account: AccountId,
+    /// Set on a token that rotation replaced: accepted until then.
+    until: Option<u64>,
+}
+
+impl std::fmt::Debug for Entry {
+    // Not even token hashes are printed (CONTRIBUTING.md).
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Entry")
+            .field("hash", &"<redacted>")
+            .field("until", &self.until)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Entry {
+    fn valid_at(&self, now_unix: u64) -> bool {
+        self.until.is_none_or(|u| u > now_unix)
+    }
+
+    fn line(&self) -> String {
+        match self.until {
+            Some(u) => format!("{} {} {u}", hex(&self.hash), hex(&self.account)),
+            None => format!("{} {}", hex(&self.hash), hex(&self.account)),
+        }
+    }
+}
+
+/// Parses one line: `None` for blank lines and comments.
+fn parse_line(line: &str) -> Result<Option<Entry>, ()> {
+    let line = line.trim();
+    if line.is_empty() || line.starts_with('#') {
+        return Ok(None);
+    }
+    let mut parts = line.split_whitespace();
+    let (Some(h), Some(a), until, None) = (parts.next(), parts.next(), parts.next(), parts.next())
+    else {
+        return Err(());
+    };
+    let (Some(hash), Some(account)) = (unhex::<32>(h), unhex::<16>(a)) else {
+        return Err(());
+    };
+    let until = match until {
+        Some(u) => Some(u.parse().map_err(|_| ())?),
+        None => None,
+    };
+    Ok(Some(Entry {
+        hash,
+        account,
+        until,
+    }))
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum RotateError {
+    /// The new hash is already a token's (this account's or another's).
+    #[error("token hash already in use")]
+    InUse,
+    #[error("cannot write {ACCOUNTS_FILE}: {0}")]
+    Io(#[from] std::io::Error),
+}
+
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum StoreError {
     #[error("unknown device")]
@@ -64,8 +140,9 @@ pub enum StoreError {
 #[derive(Debug)]
 pub struct Store {
     dir: PathBuf,
-    /// SHA-256(token) -> account id.
-    accounts: HashMap<[u8; 32], AccountId>,
+    /// Token hashes and their accounts. Changes are written to
+    /// `accounts.txt` before they take effect here.
+    accounts: Mutex<Vec<Entry>>,
     state: Mutex<State>,
     dirty: Mutex<bool>,
     /// Held while writing `state.json`, so two writers can't interleave on
@@ -109,41 +186,30 @@ impl Store {
     pub fn open(dir: &Path) -> std::io::Result<Self> {
         check_private_file(&dir.join(ACCOUNTS_FILE))?;
         check_private_file(&dir.join(STATE_FILE))?;
-        let mut accounts = HashMap::new();
-        match std::fs::read_to_string(dir.join(ACCOUNTS_FILE)) {
-            Ok(text) => {
-                for (n, line) in text.lines().enumerate() {
-                    let line = line.trim();
-                    if line.is_empty() || line.starts_with('#') {
-                        continue;
-                    }
-                    let mut parts = line.split_whitespace();
-                    let (Some(h), Some(a), None) = (parts.next(), parts.next(), parts.next())
-                    else {
-                        return Err(bad_line(n));
-                    };
-                    let (Some(h), Some(a)) = (unhex::<32>(h), unhex::<16>(a)) else {
-                        return Err(bad_line(n));
-                    };
-                    accounts.insert(h, a);
-                }
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => return Err(e),
-        }
+        let now = now_unix();
+        let on_disk = read_accounts(dir)?;
+        let expired = on_disk.iter().any(|e| !e.valid_at(now));
+        let accounts: Vec<Entry> = on_disk.into_iter().filter(|e| e.valid_at(now)).collect();
         let state = match std::fs::read(dir.join(STATE_FILE)) {
             Ok(bytes) => serde_json::from_slice(&bytes)
                 .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => State::default(),
             Err(e) => return Err(e),
         };
-        Ok(Self {
+        let store = Self {
             dir: dir.to_owned(),
-            accounts,
+            accounts: Mutex::new(accounts),
             state: Mutex::new(state),
             dirty: Mutex::new(false),
             flush_lock: Mutex::new(()),
-        })
+        };
+        // Rotated-out tokens past their 24 hours: no reason to keep even
+        // their hashes.
+        if expired {
+            let mut accounts = store.accounts.lock().expect("accounts lock");
+            store.rewrite_accounts(&mut accounts, now, &mut |e| Some(*e), None)?;
+        }
+        Ok(store)
     }
 
     /// Appends a new account to `accounts.txt`. Used by `new-account`.
@@ -151,6 +217,7 @@ impl Store {
         use std::io::Write;
         let mut id = [0u8; 16];
         rand::fill(&mut id);
+        let _lock = lock_accounts(dir)?;
         let mut f = crate::keys::private_file()
             .create(true)
             .append(true)
@@ -163,13 +230,154 @@ impl Store {
     /// The account for a token hash, if any. Compares every stored hash in
     /// constant time (spec §2.2).
     pub fn authenticate(&self, hash: &TokenHash) -> Option<AccountId> {
+        self.authenticate_at(hash, now_unix())
+    }
+
+    /// [`authenticate`](Self::authenticate) at `now_unix`. The first use of
+    /// a token that rotation added retires the token it replaced
+    /// (spec §4.6).
+    pub fn authenticate_at(&self, hash: &TokenHash, now_unix: u64) -> Option<AccountId> {
+        let mut accounts = self.accounts.lock().expect("accounts lock");
         let mut found = None;
-        for (stored, account) in &self.accounts {
-            if TokenHash(*stored).ct_eq(hash) {
-                found = Some(*account);
+        for e in accounts.iter() {
+            if TokenHash(e.hash).ct_eq(hash) && e.valid_at(now_unix) {
+                found = Some(*e);
             }
         }
-        found
+        let found = found?;
+        // Only the token rotation replaced (marked with a deadline) goes.
+        let replaced = |e: &Entry| e.account == found.account && e.until.is_some();
+        let retire = found.until.is_none() && accounts.iter().any(replaced);
+        if retire {
+            let result = self.rewrite_accounts(
+                &mut accounts,
+                now_unix,
+                &mut |e| (!replaced(e)).then_some(*e),
+                None,
+            );
+            if let Err(e) = result {
+                // Both tokens keep working; the next use tries again.
+                tracing::error!(error = %e, "cannot retire a rotated token");
+            }
+        }
+        Some(found.account)
+    }
+
+    /// Replaces the token `presented` (spec §4.6). `presented` keeps
+    /// working until `new` is first used, or for
+    /// [`ROTATION_GRACE_SECS`]; any earlier, unused replacement is dropped.
+    pub fn rotate_token(
+        &self,
+        account: AccountId,
+        presented: &TokenHash,
+        new: &TokenHash,
+        now_unix: u64,
+    ) -> Result<(), RotateError> {
+        let mut accounts = self.accounts.lock().expect("accounts lock");
+        if let Some(e) = accounts.iter().find(|e| TokenHash(e.hash).ct_eq(new)) {
+            // The same request again, after a lost response.
+            let retry = e.account == account && e.until.is_none() && e.hash != presented.0;
+            return if retry {
+                Ok(())
+            } else {
+                Err(RotateError::InUse)
+            };
+        }
+        let deadline = now_unix + ROTATION_GRACE_SECS;
+        let added = Entry {
+            hash: new.0,
+            account,
+            until: None,
+        };
+        self.rewrite_accounts(
+            &mut accounts,
+            now_unix,
+            &mut |e| {
+                if e.account != account {
+                    Some(*e)
+                } else if e.hash == presented.0 {
+                    Some(Entry {
+                        until: Some(e.until.map_or(deadline, |u| u.min(deadline))),
+                        ..*e
+                    })
+                } else {
+                    None
+                }
+            },
+            Some(added),
+        )?;
+        Ok(())
+    }
+
+    /// Whether the account still exists.
+    pub fn has_account(&self, account: AccountId) -> bool {
+        let now = now_unix();
+        self.accounts
+            .lock()
+            .expect("accounts lock")
+            .iter()
+            .any(|e| e.account == account && e.valid_at(now))
+    }
+
+    /// Deletes the account's token hashes, devices, and replay window
+    /// (spec §4.6). The scanner's lease and events are the caller's to drop.
+    pub fn delete_account(&self, account: AccountId) -> std::io::Result<()> {
+        {
+            let mut accounts = self.accounts.lock().expect("accounts lock");
+            self.rewrite_accounts(
+                &mut accounts,
+                now_unix(),
+                &mut |e| (e.account != account).then_some(*e),
+                None,
+            )?;
+        }
+        {
+            let mut st = self.state.lock().expect("store lock");
+            st.devices.retain(|_, d| d.account != account);
+            st.account_seq.remove(&hex(&account));
+        }
+        self.flush_now();
+        Ok(())
+    }
+
+    /// Applies `keep` to every entry of `accounts.txt` (as it is on disk
+    /// now) and to `memory`, drops expired tokens, appends `add`, and writes
+    /// the file atomically under the lock. `memory` changes only if the
+    /// write succeeds.
+    fn rewrite_accounts(
+        &self,
+        memory: &mut Vec<Entry>,
+        now_unix: u64,
+        keep: &mut dyn FnMut(&Entry) -> Option<Entry>,
+        add: Option<Entry>,
+    ) -> std::io::Result<()> {
+        let _lock = lock_accounts(&self.dir)?;
+        let on_disk = match std::fs::read_to_string(self.dir.join(ACCOUNTS_FILE)) {
+            Ok(t) => t,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+            Err(e) => return Err(e),
+        };
+        // Line by line, so the operator's comments survive.
+        let mut text = String::new();
+        for (n, line) in on_disk.lines().enumerate() {
+            match parse_line(line).map_err(|()| bad_line(n))? {
+                None => text.push_str(line),
+                Some(e) => match keep(&e).filter(|e| e.valid_at(now_unix)) {
+                    Some(kept) => text.push_str(&kept.line()),
+                    None => continue,
+                },
+            }
+            text.push('\n');
+        }
+        if let Some(e) = add {
+            text.push_str(&e.line());
+            text.push('\n');
+        }
+        crate::keys::write_private_atomic(&self.dir, ACCOUNTS_FILE, text.as_bytes())?;
+        let mut next: Vec<Entry> = memory.iter().filter_map(&mut *keep).chain(add).collect();
+        next.retain(|e| e.valid_at(now_unix));
+        *memory = next;
+        Ok(())
     }
 
     pub fn register_device(
@@ -316,10 +524,45 @@ fn bad_line(n: usize) -> std::io::Error {
     std::io::Error::new(
         std::io::ErrorKind::InvalidData,
         format!(
-            "{ACCOUNTS_FILE} line {}: expected `<sha256-hex> <account-id-hex>`",
+            "{ACCOUNTS_FILE} line {}: expected `<sha256-hex> <account-id-hex> [<valid-until-unix>]`",
             n + 1
         ),
     )
+}
+
+/// Every entry in `accounts.txt`, expired or not.
+fn read_accounts(dir: &Path) -> std::io::Result<Vec<Entry>> {
+    let text = match std::fs::read_to_string(dir.join(ACCOUNTS_FILE)) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(e),
+    };
+    let mut out = Vec::new();
+    for (n, line) in text.lines().enumerate() {
+        if let Some(e) = parse_line(line).map_err(|()| bad_line(n))? {
+            out.push(e);
+        }
+    }
+    Ok(out)
+}
+
+/// Serializes writers of `accounts.txt` across processes (the server and
+/// `new-account`). Released when the returned file is dropped.
+fn lock_accounts(dir: &Path) -> std::io::Result<std::fs::File> {
+    let f = crate::keys::private_file()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(dir.join(ACCOUNTS_LOCK))?;
+    f.lock()?;
+    Ok(f)
+}
+
+fn now_unix() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
 }
 
 #[cfg(test)]
@@ -456,6 +699,168 @@ mod tests {
             s.authenticate(&AccountToken::from_bytes([3; 32]).hash()),
             None
         );
+    }
+
+    #[test]
+    fn rotation_keeps_the_old_token_until_the_new_one_is_used() {
+        let dir = tmp();
+        let old = AccountToken::from_bytes([1; 32]).hash();
+        let new = AccountToken::from_bytes([2; 32]).hash();
+        let other = AccountToken::from_bytes([3; 32]).hash();
+        let id = Store::add_account_to_file(&dir, &old).unwrap();
+        let other_id = Store::add_account_to_file(&dir, &other).unwrap();
+        let s = Store::open(&dir).unwrap();
+        let t = 1_800_000_000;
+
+        // A hash already in use, the account's own or another's, is refused.
+        assert!(matches!(
+            s.rotate_token(id, &old, &old, t),
+            Err(RotateError::InUse)
+        ));
+        assert!(matches!(
+            s.rotate_token(id, &old, &other, t),
+            Err(RotateError::InUse)
+        ));
+
+        s.rotate_token(id, &old, &new, t).unwrap();
+        // A retry after a lost response succeeds.
+        s.rotate_token(id, &old, &new, t + 5).unwrap();
+        assert_eq!(s.authenticate_at(&old, t + 10), Some(id));
+        // Both survive a restart, with the old one's deadline.
+        let s = Store::open(&dir).unwrap();
+        assert_eq!(s.authenticate_at(&old, t + 10), Some(id));
+        assert_eq!(s.authenticate_at(&new, t + 10), Some(id));
+        // That first use of the new token retired the old one, on disk too.
+        assert_eq!(s.authenticate_at(&old, t + 11), None);
+        let s = Store::open(&dir).unwrap();
+        assert_eq!(s.authenticate_at(&old, t + 11), None);
+        assert_eq!(s.authenticate_at(&new, t + 11), Some(id));
+        assert_eq!(s.authenticate_at(&other, t + 11), Some(other_id));
+    }
+
+    #[test]
+    fn an_unused_new_token_is_replaced_and_the_grace_period_ends() {
+        let dir = tmp();
+        let old = AccountToken::from_bytes([1; 32]).hash();
+        let first = AccountToken::from_bytes([2; 32]).hash();
+        let second = AccountToken::from_bytes([3; 32]).hash();
+        let id = Store::add_account_to_file(&dir, &old).unwrap();
+        let s = Store::open(&dir).unwrap();
+        let t = 1_800_000_000;
+        s.rotate_token(id, &old, &first, t).unwrap();
+        // Rotating again before `first` is used replaces it, and the old
+        // token's deadline doesn't move.
+        s.rotate_token(id, &old, &second, t + 3600).unwrap();
+        assert_eq!(s.authenticate_at(&first, t + 3601), None);
+        assert_eq!(
+            s.authenticate_at(&old, t + ROTATION_GRACE_SECS - 1),
+            Some(id)
+        );
+        assert_eq!(s.authenticate_at(&old, t + ROTATION_GRACE_SECS), None);
+        assert_eq!(
+            s.authenticate_at(&second, t + ROTATION_GRACE_SECS),
+            Some(id)
+        );
+    }
+
+    #[test]
+    fn rewrites_keep_comments_and_accounts_added_meanwhile() {
+        let dir = tmp();
+        let old = AccountToken::from_bytes([1; 32]).hash();
+        let new = AccountToken::from_bytes([2; 32]).hash();
+        let id = Store::add_account_to_file(&dir, &old).unwrap();
+        let text = std::fs::read_to_string(dir.join(ACCOUNTS_FILE)).unwrap();
+        std::fs::write(dir.join(ACCOUNTS_FILE), format!("# alice\n{text}")).unwrap();
+        let s = Store::open(&dir).unwrap();
+        // `new-account` runs while the server is up.
+        let late = AccountToken::from_bytes([9; 32]).hash();
+        let late_id = Store::add_account_to_file(&dir, &late).unwrap();
+
+        s.rotate_token(id, &old, &new, 1_800_000_000).unwrap();
+        let text = std::fs::read_to_string(dir.join(ACCOUNTS_FILE)).unwrap();
+        assert!(text.starts_with("# alice\n"), "{text}");
+        let s = Store::open(&dir).unwrap();
+        assert_eq!(s.authenticate(&late), Some(late_id));
+        assert_eq!(s.authenticate(&new), Some(id));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(dir.join(ACCOUNTS_FILE))
+                .unwrap()
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
+    }
+
+    #[test]
+    fn deleting_an_account_drops_its_tokens_devices_and_seq() {
+        let dir = tmp();
+        let a = AccountToken::from_bytes([1; 32]).hash();
+        let a_new = AccountToken::from_bytes([2; 32]).hash();
+        let b = AccountToken::from_bytes([3; 32]).hash();
+        let ida = Store::add_account_to_file(&dir, &a).unwrap();
+        let idb = Store::add_account_to_file(&dir, &b).unwrap();
+        let s = Store::open(&dir).unwrap();
+        s.rotate_token(ida, &a, &a_new, 1_800_000_000).unwrap();
+        s.register_device(ida, &reg("https://g.example/a", 1), 10)
+            .unwrap();
+        let db = s
+            .register_device(idb, &reg("https://g.example/b", 1), 10)
+            .unwrap();
+        s.accept_account_seq(ida, 5).unwrap();
+
+        s.delete_account(ida).unwrap();
+        assert!(!s.has_account(ida));
+        assert_eq!(s.authenticate(&a), None);
+        assert_eq!(s.authenticate(&a_new), None);
+        assert_eq!(s.devices().len(), 1);
+        assert_eq!(s.devices()[0].0, db);
+        // A fresh window: the old seq state is gone.
+        s.accept_account_seq(ida, 1).unwrap();
+
+        let s = Store::open(&dir).unwrap();
+        assert_eq!(s.authenticate(&a), None);
+        assert_eq!(s.authenticate(&a_new), None);
+        assert_eq!(s.authenticate(&b), Some(idb));
+        assert_eq!(s.devices().len(), 1);
+        let text = std::fs::read_to_string(dir.join(ACCOUNTS_FILE)).unwrap();
+        assert!(!text.contains(&hex(&ida)), "the account id is gone");
+    }
+
+    #[test]
+    fn using_a_token_never_revokes_another_unrotated_one() {
+        // An operator gave one account two tokens by hand.
+        let dir = tmp();
+        let a = AccountToken::from_bytes([1; 32]).hash();
+        let b = AccountToken::from_bytes([2; 32]).hash();
+        let id = Store::add_account_to_file(&dir, &a).unwrap();
+        let text = std::fs::read_to_string(dir.join(ACCOUNTS_FILE)).unwrap();
+        std::fs::write(
+            dir.join(ACCOUNTS_FILE),
+            format!("{text}{} {}\n", b.to_hex(), hex(&id)),
+        )
+        .unwrap();
+        let s = Store::open(&dir).unwrap();
+        assert_eq!(s.authenticate(&a), Some(id));
+        assert_eq!(s.authenticate(&b), Some(id));
+        assert_eq!(s.authenticate(&a), Some(id));
+    }
+
+    #[test]
+    fn expired_tokens_leave_the_file_at_start() {
+        let dir = tmp();
+        let live = AccountToken::from_bytes([1; 32]).hash();
+        let id = Store::add_account_to_file(&dir, &live).unwrap();
+        let dead = AccountToken::from_bytes([2; 32]).hash();
+        let mut text = std::fs::read_to_string(dir.join(ACCOUNTS_FILE)).unwrap();
+        text.push_str(&format!("{} {} 1000\n", dead.to_hex(), hex(&id)));
+        std::fs::write(dir.join(ACCOUNTS_FILE), text).unwrap();
+        let s = Store::open(&dir).unwrap();
+        assert_eq!(s.authenticate(&dead), None);
+        let text = std::fs::read_to_string(dir.join(ACCOUNTS_FILE)).unwrap();
+        assert!(!text.contains(&dead.to_hex()), "{text}");
+        assert_eq!(s.authenticate(&live), Some(id));
     }
 
     #[test]
