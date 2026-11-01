@@ -323,18 +323,22 @@ impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogBuf {
     }
 }
 
-/// One process-wide capture with the production filter at its most verbose.
+/// One process-wide capture with the production filter at its most verbose,
+/// installed the way `main` installs it, so `log` records from dependencies
+/// (such as `ohttp`'s) arrive too.
 /// Thread-scoped subscribers miss events when tests run in parallel, so
 /// every test in this binary logs here, and the leak checks see all of it.
 pub(crate) fn global_logs() -> &'static LogBuf {
     static LOGS: std::sync::OnceLock<LogBuf> = std::sync::OnceLock::new();
     LOGS.get_or_init(|| {
         let logs = LogBuf::default();
-        let subscriber = tracing_subscriber::fmt()
+        use tracing_subscriber::util::SubscriberInitExt as _;
+        tracing_subscriber::fmt()
             .with_env_filter(lz_server::log_filter("trace"))
             .with_writer(logs.clone())
-            .finish();
-        tracing::subscriber::set_global_default(subscriber).expect("one global subscriber");
+            .finish()
+            .try_init()
+            .expect("one global subscriber");
         logs
     })
 }

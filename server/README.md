@@ -95,7 +95,9 @@ when their next `wake` gets `unknown-device`.
   derived from them.
 - **Logs.** Nothing logs tokens, request bodies, headers, or push endpoints.
   HTTP library logs are capped at `warn` even with `RUST_LOG=trace`, because
-  they include hosts. A test checks this at trace level.
+  they include hosts; so are `ohttp` and `bhttp`, whose trace logs include
+  derived key material and message bytes. A test checks this at trace
+  level.
 - **Memory hygiene (spec §6.2).** At start, before loading any key, the
   server turns off its core dumps (`RLIMIT_CORE` 0; on Linux also not
   dumpable, which blocks `ptrace` too) and, on Linux with an unlimited

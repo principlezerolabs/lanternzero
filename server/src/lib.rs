@@ -209,9 +209,12 @@ pub fn rotate_vapid(dir: &std::path::Path, drop_old: bool) -> Result<String, Sta
     Ok(keys::rotate_vapid(dir, drop_old)?)
 }
 
-/// Crates whose debug and trace logs include hosts, URLs, or headers.
-/// They are capped at `warn` whatever `RUST_LOG` says (invariants 1 and 6).
+/// Crates whose debug and trace logs include hosts, URLs, or headers, or,
+/// for `ohttp`, derived key material and request bytes. They are capped at
+/// `warn` whatever `RUST_LOG` says (invariants 1 and 6).
 const NOISY_DEPENDENCIES: &[&str] = &[
+    "ohttp",
+    "bhttp",
     "hyper",
     "hyper_util",
     "h2",

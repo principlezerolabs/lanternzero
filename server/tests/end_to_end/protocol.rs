@@ -268,6 +268,9 @@ async fn logs_never_contain_tokens() {
         !text.contains("push.example.app"),
         "push endpoint found in logs"
     );
+    // `ohttp` traces derived key material (HKDF output) and request bytes:
+    // it must be capped like the other noisy dependencies.
+    assert!(!text.contains("HKDF"), "ohttp key derivation found in logs");
 }
 
 #[tokio::test]

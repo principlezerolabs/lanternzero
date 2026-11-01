@@ -48,6 +48,9 @@ only when they change.
   send each request to one of the vendor's relays, rotating among them.
 - Send exactly one `wake` per wake and long-poll while in the foreground,
   in both modes (spec §3.3).
+- If the app forwards Rust `log` records (for example to logcat), cap the
+  `ohttp` and `bhttp` targets at `warn`: at trace level `ohttp` logs
+  derived key material and message bytes.
 - Get the user's consent before the first lease (spec §6.3), and use hints
   only to reorder its normal sync.
 - Subscribe at the vendor's push gateway with the server's
