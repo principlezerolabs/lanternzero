@@ -50,7 +50,7 @@ jobs:
       - if: matrix.toolchain == '1.86'
         run: cargo +1.86 test -p lz-proto --locked
       - if: matrix.toolchain == '1.89'
-        run: cargo +1.89 test -p lz-server --locked
+        run: cargo +1.89 test -p lz-server -p lz-gateway --locked
 
   # Integration tests against real Zebra and Zaino on a private regtest
   # chain (deploy/regtest).

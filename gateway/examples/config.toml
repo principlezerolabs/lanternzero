@@ -1,0 +1,28 @@
+# Example gateway configuration. TLS is terminated in front of the gateway.
+listen = "127.0.0.1:8090"
+# Endpoints are built on this origin, and servers' VAPID tokens must name it.
+public_origin = "https://push.example-wallet.app"
+# Holds the endpoint-sealing key. Losing it invalidates every endpoint.
+data_dir = "./lz-gateway-data"
+# Relayed by Apple and Google, so it must say nothing about the payment.
+alert_title = "New activity"
+
+[apns]
+team_id = "ABCDE12345"
+key_id = "KEY1234567"
+# The .p8 auth key from Apple. Keep it out of the repository.
+key_path = "/etc/lz-gateway/AuthKey_KEY1234567.p8"
+# The wallet app's bundle id.
+topic = "app.example.wallet"
+sandbox = false
+
+[fcm]
+project_id = "example-wallet"
+# A service-account key with the Firebase Cloud Messaging API role.
+credentials_path = "/etc/lz-gateway/fcm-service-account.json"
+
+[limits]
+# Spec §5.3: per device; background and alerts have separate budgets.
+background_per_hour = 3
+alerts_per_hour = 20
+per_server_per_minute = 100000

@@ -130,7 +130,7 @@ MSRV checks override it with `cargo +1.86` and `cargo +1.89`.
 scripts/check.sh                # fmt, clippy, privacy guards, typos; deny/machete if installed
 cargo +stable test --workspace  # CI stable matrix leg (+stable, not the fmt/clippy pin)
 cargo +1.86 test -p lz-proto      # client-side crates' minimum Rust
-cargo +1.89 test -p lz-server     # the server's minimum Rust
+cargo +1.89 test -p lz-server -p lz-gateway   # server and gateway minimum Rust
 cargo deny check                  # required; also run by scripts/check.sh when cargo-deny is installed
 ```
 

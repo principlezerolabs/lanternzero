@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/lz-proto", "server"]
+members = ["crates/lz-proto", "server", "gateway"]
 
 [workspace.package]
 edition = "2024"

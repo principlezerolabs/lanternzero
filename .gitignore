@@ -16,3 +16,4 @@
 
 # Server data directories (keys, token hashes): never commit
 lz-data/
+lz-gateway-data/

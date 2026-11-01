@@ -64,7 +64,7 @@ same copy. Treat a violation as a bug, and test for it.
 | --- | --- |
 | `spec/` | URL format and HTTP API: registration, lease renewal, hint list, long-poll, webhooks. **Change the spec first**; code follows. Version it. |
 | `server/` | Chain follower, wake-up scheduler, scanner with RAM leases, hint list, long-poll and webhook endpoints, OHTTP gateway side |
-| `gateway/` | Reference push gateway: accepts encrypted pings, forwards to APNs/FCM |
+| `gateway/` | Reference push gateway (prototype): stateless sealed endpoints, subscriptions bound to one server's VAPID key, per-device rate limits, forwards to APNs/FCM |
 | `crates/lz-proto/` | Shared protocol types from the spec: requests and responses, padding, tokens, event ids, replay window. Test vectors in `spec/vectors/` |
 | `client/` | Rust client core for wallets (OHTTP, registration, lease renewal, hint list, long-poll). No I/O: the host app sends the bytes |
 | `deploy/` | Docker Compose self-host kit: profiles `full` (Zebra, Zaino, server, Tor) and `byo-node` (server and Tor, pointed at an existing node), with hardening for spec §6.2. Plan in `deploy/DESIGN.md` |
