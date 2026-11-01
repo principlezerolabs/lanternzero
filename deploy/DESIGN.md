@@ -42,8 +42,8 @@ two more subcommands next to `new-account`:
   - the chain tip is current, plus Zebra's sync progress when the kit runs
     Zebra;
   - core dumps are off (`RLIMIT_CORE`);
-  - swap is off for the container (`memory.swap.max`), or the host's swap
-    is encrypted;
+  - memory can be locked (`RLIMIT_MEMLOCK` unlimited), or swap is off for
+    the container (`memory.swap.max`), or the host's swap is encrypted;
   - data directory permissions;
   - the onion service or the OHTTP gateway answers `/.well-known/ohttp-gateway`;
   - the clock is within the 60 s replay window (spec §3.4).
@@ -68,15 +68,18 @@ but it could hide blocks and cause missed alerts.
 
 ### 2. Hardening that enforces invariant 1
 
-The workspace forbids `unsafe`, so the server can't `mlock` its memory or
-turn off its own core dumps. Also, the decoded Sapling and Orchard key types
-from the Zcash crates don't zero themselves on drop. The kit must enforce spec §6.2 instead, and
-`doctor` checks that it did:
+The server protects itself at start (`server/src/hardening.rs`, through
+`rustix`, so still no `unsafe` of our own). It turns off its core dumps,
+locks its memory when the memlock limit is unlimited, and with `[chain]`
+refuses to start if swap could hold its memory. The decoded Sapling and
+Orchard key types from the Zcash crates don't zero themselves on drop,
+which is one more reason swap must not hold them. The kit sets the
+limits that let those protections hold, and `doctor` checks them:
 
 | Spec §6.2 rule | Compose setting |
 | --- | --- |
-| No core dumps | `ulimits: { core: 0 }` |
-| No swap | `memswap_limit` equal to `mem_limit` (cgroup v2), or the host's swap encrypted |
+| No core dumps | `ulimits: { core: 0 }` (the server also sets this itself) |
+| No swap | `ulimits: { memlock: -1 }` so the server locks its memory; or `memswap_limit` equal to `mem_limit` (cgroup v2); or the host's swap encrypted, with `hardening.allow_swap` |
 | Nothing written outside the data dir | `read_only: true`, with `tmpfs` for `/tmp` |
 | Least privilege | non-root user, `cap_drop: [ALL]`, `security_opt: [no-new-privileges:true]` |
 | Logs | stdout only, with size-capped rotation; the server already never logs tokens, endpoints, or bodies |

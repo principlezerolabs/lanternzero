@@ -36,6 +36,9 @@ pub struct Config {
     pub push: PushConfig,
     #[serde(default)]
     pub limits: LimitsConfig,
+    /// Memory hygiene (spec §6.2); see [`crate::hardening`].
+    #[serde(default)]
+    pub hardening: crate::hardening::HardeningConfig,
 }
 
 /// The Zaino or lightwalletd server to follow.

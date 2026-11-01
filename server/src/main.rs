@@ -3,6 +3,8 @@
 //! connection URL once (self-hosting; spec §2.3).
 //! `lz-server <config.toml> rotate-vapid [--drop-old]` replaces the VAPID
 //! key, used from the next start (spec §5.3).
+//! `lz-server <config.toml> doctor` checks the install and prints pass,
+//! warn, or fail for each check, with nothing secret in the output.
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -26,7 +28,7 @@ async fn main() -> ExitCode {
         [c, cmd, flag] => (PathBuf::from(c), Some(cmd.as_str()), Some(flag.as_str())),
         _ => {
             tracing::error!(
-                "usage: lz-server <config.toml> [new-account | rotate-vapid [--drop-old]]"
+                "usage: lz-server <config.toml> [new-account | rotate-vapid [--drop-old] | doctor]"
             );
             return ExitCode::FAILURE;
         }
@@ -42,6 +44,7 @@ async fn main() -> ExitCode {
     match (command, flag) {
         (None, _) => serve(config).await,
         (Some("new-account"), None) => new_account(&config),
+        (Some("doctor"), None) => doctor(&config).await,
         (Some("rotate-vapid"), None) => rotate_vapid(&config, false),
         (Some("rotate-vapid"), Some("--drop-old")) => rotate_vapid(&config, true),
         (Some(other), _) => {
@@ -52,6 +55,34 @@ async fn main() -> ExitCode {
 }
 
 async fn serve(config: Config) -> ExitCode {
+    // Before any key is loaded (spec §6.2).
+    let report = lz_server::hardening::apply();
+    let scanning = config.chain.is_some();
+    match lz_server::hardening::verdict(&report, scanning, &config.hardening) {
+        lz_server::hardening::Verdict::Ok => {
+            tracing::info!(memory = ?report.memory, swap = ?report.swap, "memory hygiene ok");
+        }
+        lz_server::hardening::Verdict::Warn => {
+            tracing::warn!(
+                memory = ?report.memory,
+                swap = ?report.swap,
+                core_dumps_off = report.core_dumps_off,
+                scanning,
+                allow_swap = config.hardening.allow_swap,
+                "swap may hold this process's memory; run `doctor` for how to fix it"
+            );
+        }
+        lz_server::hardening::Verdict::Refuse => {
+            tracing::error!(
+                memory = ?report.memory,
+                swap = ?report.swap,
+                core_dumps_off = report.core_dumps_off,
+                "refusing to start: viewing keys could reach swap or a core dump \
+                 (spec §6.2); run `doctor` for how to fix it"
+            );
+            return ExitCode::FAILURE;
+        }
+    }
     let listen = config.listen;
     let state = match AppState::new(config) {
         Ok(s) => s,
@@ -128,6 +159,23 @@ async fn shutdown_signal() {
         () = term => {}
     }
     tracing::info!("shutting down");
+}
+
+/// Prints each check; fails if any check failed.
+#[allow(clippy::print_stdout)] // Deliberate: the report is the output.
+async fn doctor(config: &Config) -> ExitCode {
+    let checks = lz_server::doctor::run(config).await;
+    for c in &checks {
+        println!("{c}");
+    }
+    if checks
+        .iter()
+        .any(|c| c.status == lz_server::doctor::Status::Fail)
+    {
+        ExitCode::FAILURE
+    } else {
+        ExitCode::SUCCESS
+    }
 }
 
 /// Retires the VAPID key (spec §5.3). Devices keep the key they were

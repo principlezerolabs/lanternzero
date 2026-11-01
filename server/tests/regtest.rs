@@ -174,6 +174,7 @@ fn state() -> Arc<AppState> {
         }),
         push: PushConfig::default(),
         limits: LimitsConfig::default(),
+        hardening: Default::default(),
     })
     .unwrap()
 }

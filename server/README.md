@@ -32,11 +32,16 @@ scanning also against real Zebra and Zaino on regtest
   the mempool unmined stays `mempool` until acknowledged or 7 days old.
 - **Spend alerts.** Leases with `spend_alerts: true` get
   `501 spend-alerts-unavailable`.
-- **Locked memory.** Keys are zeroed where we hold them as text, but the
-  decoded Sapling and Orchard key types don't zero themselves; deployments
-  must disable swap and core dumps (spec §6.2).
+- **Zeroing decoded keys.** Keys are zeroed where we hold them as text,
+  but the decoded Sapling and Orchard key types from the Zcash crates don't
+  zero themselves on drop. Locked memory and no core dumps (below) keep
+  them off disk meanwhile.
 - **Webhooks** (§4.5).
 - **OHTTP key rotation.** The OHTTP key configuration doesn't rotate yet.
+- **More `doctor` checks and `init`** (deploy/DESIGN.md). `doctor` doesn't
+  yet check that the onion service or OHTTP gateway answers from outside,
+  or the clock beyond what the tip's age shows; `lz-server init` doesn't
+  exist yet.
 - **Live account loading.** `new-account` takes effect after a restart.
 
 ## Run
@@ -74,10 +79,25 @@ when their next `wake` gets `unknown-device`.
 - **Logs.** Nothing logs tokens, request bodies, headers, or push endpoints.
   HTTP library logs are capped at `warn` even with `RUST_LOG=trace`, because
   they include hosts. A test checks this at trace level.
-- **Core dumps.** The workspace forbids `unsafe`, so the process doesn't
-  disable its own core dumps. Before the scanner holds keys, deployments must
-  turn them off: `LimitCORE=0` in systemd, or `--ulimit core=0` in Docker
-  (spec §6.2).
+- **Memory hygiene (spec §6.2).** At start, before loading any key, the
+  server turns off its core dumps (`RLIMIT_CORE` 0; on Linux also not
+  dumpable, which blocks `ptrace` too) and, on Linux with an unlimited
+  memlock limit, locks all its memory (`mlockall`). Otherwise it checks
+  that swap can't take its pages: no swap, a container whose cgroup
+  forbids swap (`memory.swap.max` 0), or macOS, which always encrypts
+  swap. A server with `[chain]` (so it may hold viewing keys) **refuses to
+  start** when none of that holds. To fix it, give it an unlimited memlock
+  limit (`LimitMEMLOCK=infinity` in systemd, `--ulimit memlock=-1` in
+  Docker), or turn swap off for it (`--memory-swap` equal to `--memory`).
+  If its swap is encrypted, set `hardening.allow_swap = true`. Locked
+  memory can't be reclaimed, so it all counts against a container's memory
+  limit: size the limit for the server's peak (the mempool snapshot alone
+  may reach 64 MiB). The calls go through `rustix`, so the workspace still
+  has no `unsafe` of its own.
+- **`lz-server <config> doctor`** checks the data directory's
+  permissions, core dumps, memory and swap, and the chain source (network
+  and tip age), and prints pass, warn, or fail for each. Its output has no
+  tokens, keys, URLs, or host names, so it's safe to paste into an issue.
 - **Web Push crypto** (`src/webpush.rs`) is built on RustCrypto primitives
   and checked against the RFC 8291 test vector. Existing Web Push crates
   depend on a `crypto-bigint` with timing leaks (RUSTSEC-2026-0387).

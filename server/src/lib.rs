@@ -16,7 +16,9 @@
 pub mod api;
 pub mod chain;
 pub mod config;
+pub mod doctor;
 pub mod gateway;
+pub mod hardening;
 pub mod keys;
 pub mod limits;
 pub mod mempool;

@@ -1791,6 +1791,7 @@ dependencies = [
  "rand 0.10.3",
  "redjubjub",
  "reqwest",
+ "rustix",
  "sapling-crypto",
  "serde",
  "serde_json",

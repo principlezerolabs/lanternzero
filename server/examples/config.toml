@@ -17,6 +17,12 @@ poll_secs = 5
 # gateway_allowlist = ["push.examplewallet.app"]
 max_devices_per_account = 10
 
+# Memory hygiene (spec §6.2). With [chain], the server refuses to start
+# unless its memory is locked (memlock limit unlimited) or swap can't hold
+# it. Set this only if swap is encrypted.
+# [hardening]
+# allow_swap = false
+
 [limits]
 # Requests per minute. A foreground wallet long-polls about every 25 s.
 account_per_minute = 120

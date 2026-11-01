@@ -71,6 +71,7 @@ pub(crate) fn harness_full(
             ..PushConfig::default()
         },
         limits,
+        hardening: Default::default(),
     };
     let state = AppState::new(config).unwrap();
     let app = gateway::router(state.clone());
