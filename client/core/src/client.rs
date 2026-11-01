@@ -4,13 +4,15 @@ use std::collections::HashMap;
 
 use lz_proto::api::{
     DeviceRegistered, DeviceRegistration, Event, EventStatus, EventsRequest, EventsResponse, Hint,
-    Info, LeaseStatus, PushKeys, SeqOnly, TokenRotate, WakeRequest, WakeResponse,
+    Info, LeaseStatus, PushKeys, SeqOnly, TokenRotate, WakeRequest, WakeResponse, WebhookConfig,
+    WebhookSecret,
 };
 use lz_proto::lease::{LeaseRequest, Network};
 use lz_proto::problem;
 use lz_proto::replay::next_seq;
 use lz_proto::token::AccountToken;
 use lz_proto::url::ConnectionUrl;
+use lz_proto::webhook::SigningSecret;
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
@@ -124,6 +126,14 @@ pending!(
 pending!(
     /// An `events` long-poll (or `next` page fetch) in flight.
     PendingEvents { acks: Vec<String> }
+);
+pending!(
+    /// A `PUT /v0/webhook` in flight.
+    PendingSetWebhook
+);
+pending!(
+    /// A `DELETE /v0/webhook` in flight.
+    PendingDeleteWebhook
 );
 
 impl PendingRotate {
@@ -495,6 +505,50 @@ impl Client {
         let url = pending.new_url.to_url();
         self.url = pending.new_url;
         Ok(url)
+    }
+
+    /// `PUT /v0/webhook` (spec §4.5): deliveries of this account's events
+    /// go to `url` from now on, signed with a new secret. For merchant
+    /// backends and self-hosters, not phones; the server must offer
+    /// scanning (`Error::ScanningUnavailable` otherwise).
+    pub fn set_webhook(&mut self, now_unix_ms: u64, url: &str) -> Result<PendingSetWebhook, Error> {
+        let body = to_json(&WebhookConfig {
+            seq: self.seq(now_unix_ms),
+            url: url.to_owned(),
+        })?;
+        let ex = self.exchange("PUT", "/v0/webhook", true, now_unix_ms, Some(&body))?;
+        Ok(PendingSetWebhook { ex })
+    }
+
+    /// The new signing secret, which the server sends only this once: store
+    /// it where the receiver can verify deliveries with
+    /// [`lz_proto::webhook::verify`].
+    pub fn finish_set_webhook(
+        &mut self,
+        pending: PendingSetWebhook,
+        response: HttpResponse<'_>,
+    ) -> Result<SigningSecret, Error> {
+        let body = self.open(pending.ex, response, 200)?;
+        let reply: WebhookSecret = serde_json::from_slice(&body).map_err(|_| Error::Malformed)?;
+        SigningSecret::parse(&reply.secret).ok_or(Error::Malformed)
+    }
+
+    /// `DELETE /v0/webhook` (spec §4.5).
+    pub fn delete_webhook(&mut self, now_unix_ms: u64) -> Result<PendingDeleteWebhook, Error> {
+        let body = to_json(&SeqOnly {
+            seq: self.seq(now_unix_ms),
+        })?;
+        let ex = self.exchange("DELETE", "/v0/webhook", true, now_unix_ms, Some(&body))?;
+        Ok(PendingDeleteWebhook { ex })
+    }
+
+    pub fn finish_delete_webhook(
+        &mut self,
+        pending: PendingDeleteWebhook,
+        response: HttpResponse<'_>,
+    ) -> Result<(), Error> {
+        self.open(pending.ex, response, 204)?;
+        Ok(())
     }
 
     /// `DELETE /v0/account` (spec §4.6): the server drops everything about

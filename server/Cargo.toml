@@ -63,7 +63,7 @@ sapling = { package = "sapling-crypto", version = "0.9", default-features = fals
 ohttp = { version = "0.8", default-features = false, features = ["client", "server", "rust-hpke"] }
 serde_json = "1"
 # The wallet client core, driven against the real server.
-lz-client = { path = "../client/core" }
+lz-client = { path = "../client/core", features = ["reqwest"] }
 # Paused time for timing tests.
 tokio = { version = "1", features = ["test-util"] }
 

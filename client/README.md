@@ -32,6 +32,7 @@ builds on Rust 1.89, librustzcash's own minimum.
 | §4.2 | `wake`, with or without a lease. Leases are checked first: no full viewing key without spend alerts. `Client::without_device` is for clients with no push endpoint, such as merchant backends: `wake` and `poll` send `device_id: null` and need no registration; renew the lease every 30 minutes |
 | §4.3 | The long-poll: `poll` uses a 25 s `wait`, or `wait: 0` when the last response said more events are waiting |
 | §4.4 | Acknowledgements ride on the next request and stay queued until one succeeds. Only `mined` events are acknowledged |
+| §4.5 | `set_webhook` returns the new signing secret once (`lz_proto::webhook::SigningSecret`); the receiver checks each delivery with `lz_proto::webhook::verify` and deduplicates on `webhook-id`. `delete_webhook` removes it |
 | §4.6 | `rotate_token` to a token the app generated and stored first; `finish_rotate` switches to it and returns the new connection URL. `delete_account` clears the client |
 | §4.7 | `info`: network and version checks; reports when the server's VAPID key changed |
 | §5 | `PushReceiver`: the device's RFC 8291 keys, and opening a fixed-size ping (checked against the RFC 8291 example) |
@@ -64,11 +65,16 @@ only when they change.
   when the user removes the server. The reference gateway's wallet API is
   in [`gateway/README.md`](../gateway/README.md).
 
+## Merchant backends
+
+Turn on the `reqwest` feature (off by default; wallet apps don't need it)
+and send each request with `lz_client::http::send` to a relay's URL, then
+pass `as_response()` to the matching `finish_*` call. Use
+`Client::without_device`, renew the lease every 30 minutes, and set a
+webhook, or long-poll. The feature brings in reqwest, rustls, and tokio,
+which wallet SDKs must not embed.
+
 ## Not yet
 
-- Webhook calls (`PUT`/`DELETE /v0/webhook`). Receivers can verify
-  deliveries with `lz_proto::webhook::verify` today.
-- An optional `reqwest` feature that sends requests itself, for merchant
-  backends.
 - Choosing relays. Relay addressing differs between relay software
   (spec §9).

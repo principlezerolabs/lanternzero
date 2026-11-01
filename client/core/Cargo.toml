@@ -28,6 +28,13 @@ serde_json = "1"
 sha2 = "0.11"
 thiserror = "2"
 zeroize = "1.8"
+# Off by default: wallet apps send the bytes themselves. Merchant backends
+# and tests may turn it on to send with reqwest (`lz_client::http`). Same
+# version and TLS choice as the server, so the workspace has one copy.
+reqwest = { version = "0.13", default-features = false, features = ["rustls"], optional = true }
+
+[features]
+reqwest = ["dep:reqwest"]
 
 [dev-dependencies]
 # A stand-in OHTTP gateway for the unit tests. The end-to-end tests against

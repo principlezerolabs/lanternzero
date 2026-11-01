@@ -238,3 +238,64 @@ async fn the_webhook_survives_a_restart_and_needs_a_safe_url() {
     assert_eq!(r.status, 204);
     assert!(h.state.store.webhooks().is_empty());
 }
+
+/// The client core's webhook calls, sent with its `reqwest` feature to the
+/// server's gateway over real HTTP (the test plays a relay that forwards
+/// to it unchanged).
+#[tokio::test]
+async fn a_merchant_sets_and_deletes_its_webhook_through_the_client_core() {
+    use lz_client::{Client, ClientState, KeyConfig, Transport};
+    use lz_proto::lease::Network;
+    use lz_proto::url::ConnectionUrl;
+
+    let s = shop().await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let app = lz_server::gateway::router(s.h.state.clone());
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let gateway = format!("http://{addr}{}", lz_server::gateway::GATEWAY_PATH);
+
+    let config = s.h.key_config().await;
+    let url = ConnectionUrl::parse(&format!(
+        "lanternzero://{}{}#{}",
+        super::harness::HOST,
+        super::harness::BASE,
+        s.h.token
+    ))
+    .unwrap();
+    let mut c = Client::new(
+        url,
+        Network::Main,
+        Transport::Ohttp(KeyConfig::from_two_sources(&config, &config).unwrap()),
+        ClientState::default(),
+    )
+    .unwrap()
+    .without_device();
+    let http = reqwest::Client::builder()
+        .timeout(Duration::from_secs(40))
+        .build()
+        .unwrap();
+    let now = || {
+        SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64
+    };
+
+    let (hook, _got) = receiver(StatusCode::OK).await;
+    let p = c.set_webhook(now(), &hook).unwrap();
+    let r = lz_client::http::send(&http, &gateway, p.request())
+        .await
+        .unwrap();
+    let secret = c.finish_set_webhook(p, r.as_response()).unwrap();
+    let stored = s.h.state.store.webhooks();
+    assert_eq!(stored.len(), 1);
+    assert_eq!(stored[0].secret, secret);
+
+    let p = c.delete_webhook(now()).unwrap();
+    let r = lz_client::http::send(&http, &gateway, p.request())
+        .await
+        .unwrap();
+    c.finish_delete_webhook(p, r.as_response()).unwrap();
+    assert!(s.h.state.store.webhooks().is_empty());
+}
