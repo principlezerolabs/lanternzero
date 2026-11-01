@@ -90,7 +90,8 @@ same copy. Treat a violation as a bug, and test for it.
   `payjoin/rust-payjoin` (`payjoin-mailroom`); the standalone
   `payjoin/ohttp-relay` was archived in Dec 2025. It forwards only to
   gateways declaring the BIP77 purpose, so it needs a configurable-purpose
-  change before it can carry Lantern Zero traffic (spec §9).
+  change before it can carry Lantern Zero traffic (spec §9). That change is
+  proposed upstream in payjoin/rust-payjoin#2026.
 - **Decided (2026-10-31):**
   - **Workspace:** one Cargo workspace (`crates/lz-proto`, `server`,
     `gateway`, `client/core`). Client-side crates (`lz-proto`, client core)
