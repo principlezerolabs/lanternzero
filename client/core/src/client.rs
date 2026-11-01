@@ -40,6 +40,11 @@ pub struct ClientState {
     pub vapid_public_key: Option<String>,
     /// The last `seq` sent (spec §3.4).
     pub last_seq: Option<u64>,
+    /// How far the server's clock is ahead of this device's, in ms, as
+    /// learned from a `bad-date` answer (spec §3.4). Added to the time of
+    /// every `Date` sent.
+    #[serde(default)]
+    pub clock_offset_ms: i64,
 }
 
 /// One server connection.
@@ -68,6 +73,8 @@ impl std::fmt::Debug for Client {
 struct Exchange {
     request: HttpRequest,
     opener: Opener,
+    /// The device's own clock when the request was built.
+    built_unix_ms: u64,
 }
 
 macro_rules! pending {
@@ -534,10 +541,14 @@ impl Client {
             method,
             path,
             auth.then_some(&self.url.token),
-            now_unix_ms,
+            now_unix_ms.saturating_add_signed(self.state.clock_offset_ms),
             body,
         )?;
-        Ok(Exchange { request, opener })
+        Ok(Exchange {
+            request,
+            opener,
+            built_unix_ms: now_unix_ms,
+        })
     }
 
     /// Opens the response; anything but `expect` becomes an [`Error`].
@@ -551,11 +562,11 @@ impl Client {
         if inner.status == expect {
             Ok(inner.body)
         } else {
-            Err(self.problem(&inner))
+            Err(self.problem(&inner, ex.built_unix_ms))
         }
     }
 
-    fn problem(&mut self, inner: &Inner) -> Error {
+    fn problem(&mut self, inner: &Inner, built_unix_ms: u64) -> Error {
         #[derive(Deserialize)]
         struct Problem {
             #[serde(rename = "type", default)]
@@ -585,6 +596,20 @@ impl Client {
                 self.forget_device();
                 Error::UnknownDevice
             }
+            // The device clock is off: correct it from the answer's `Date`.
+            // The server answers at once, so the round trip adds little.
+            (400, problem::BAD_DATE) => match inner.date_unix_ms {
+                Some(server) => {
+                    let offset = i128::from(server) - i128::from(built_unix_ms);
+                    self.state.clock_offset_ms =
+                        i64::try_from(offset).unwrap_or(self.state.clock_offset_ms);
+                    Error::ClockCorrected
+                }
+                None => Error::Server {
+                    status: 400,
+                    problem: slug,
+                },
+            },
             (409, problem::TOO_MANY_DEVICES) => Error::TooManyDevices,
             (400, problem::UNKNOWN_VAPID_KEY) => Error::UnknownVapidKey,
             (429, _) => Error::RateLimited {

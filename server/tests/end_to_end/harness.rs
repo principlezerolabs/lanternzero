@@ -99,6 +99,7 @@ pub(crate) struct Reply {
     pub(crate) json: Value,
     pub(crate) padded_len: usize,
     pub(crate) retry_after: Option<String>,
+    pub(crate) date: Option<String>,
 }
 
 impl Harness {
@@ -151,6 +152,10 @@ impl Harness {
             .header()
             .get(b"retry-after")
             .map(|v| String::from_utf8(v.to_vec()).unwrap());
+        let date = msg
+            .header()
+            .get(b"date")
+            .map(|v| String::from_utf8(v.to_vec()).unwrap());
         let json = if msg.content().is_empty() {
             Value::Null
         } else {
@@ -161,6 +166,7 @@ impl Harness {
             json,
             padded_len,
             retry_after,
+            date,
         }
     }
 

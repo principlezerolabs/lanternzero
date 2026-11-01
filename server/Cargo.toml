@@ -64,6 +64,8 @@ ohttp = { version = "0.8", default-features = false, features = ["client", "serv
 serde_json = "1"
 # The wallet client core, driven against the real server.
 lz-client = { path = "../client/core" }
+# Paused time for timing tests.
+tokio = { version = "1", features = ["test-util"] }
 
 [lints]
 workspace = true

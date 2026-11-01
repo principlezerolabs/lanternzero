@@ -19,11 +19,11 @@ scanning also against real Zebra and Zaino on regtest
 | `POST /v0/token/rotate`, `DELETE /v0/account` | §4.6 | Rotation keeps the old token until the new one is first used, or for 24 h; retries succeed; reused hashes get `400`. Deletion drops token hashes, devices, replay window, lease, events, and hints at once. Both rewrite `accounts.txt` atomically under a lock shared with `new-account`, keeping comments and accounts added meanwhile |
 | Scanning time and idle accounts | §4.2, §4.6, §4.7 | `[accounts]`: `scanning = "entitled"` limits leases to accounts with scanning time and clamps them to its end, answering `403 scanning-not-included` (fixed size) otherwise; `idle_account_days` deletes accounts idle longer, keeping only the UTC day of each account's last request, skipping days the server was down, and is published in `info` |
 | Issuer interface | §2.3, §4.6 | [`ISSUER.md`](ISSUER.md): HTTP over `data_dir/issuer.sock` (0600), never TCP or OHTTP. `create` (live at once), `resolve`, `scan_until`, `add_scan_time` (idempotent by key), `deletions` (30 days), `delete` |
-| `POST /v0/events` | §4.3 | Long-poll held until the server-wide release (new block, match, or reorg) plus 0–2 s jitter, or 25–30 s; never early, even with events pending; `wait: 0` for `next` pages |
+| `POST /v0/events` | §4.3 | Long-poll held until the server-wide release (new block, match, or reorg; at most one every 5 s) plus 0–2 s jitter, or 25–30 s; never early, even with events pending; `wait: 0` for `next` pages |
 | Scanner | §4.4, §6.1 | Trial decryption of Sapling outputs and Orchard and Ironwood actions in compact blocks, for every active lease; deterministic event ids; `mined` → `reorged` → re-mined; confirmations up to the finality depth; events deleted on ack or after 7 days; expired leases swept every minute; catches up after falling behind |
 | Mempool | §4.3, §6.1 | `GetMempoolStream`, reopened after each block; full transactions (v5 and v6) cut to `CompactTx` and trial-decrypted like blocks; matches are `mempool` events that become `mined` with the same id; a new lease is checked against the pending mempool, kept in compact form up to 64 MiB; an unknown branch id is logged, not fatal |
 | Payment alerts | §5.2 | `instant`: an extra `Urgency: high` push when a payment is first seen (usually in the mempool, seconds after it was sent), one per transaction, at most 2 a minute per account; `private`: up to 4 events inside the scheduled ping, same 1024-byte size. Backfilled payments don't push |
-| Replay protection | §3.4 | `Date` within 60 s; `seq` windows per device, or per account for registration, rotation, and deletion; `409 stale-seq` with `min_seq` |
+| Replay protection | §3.4 | `Date` within 60 s, and a `Date` on every response so wallets can correct their clocks; `seq` windows per device, or per account for registration, rotation, and deletion; `409 stale-seq` with `min_seq` |
 | Rate limits | §3.5 | Per account and per device, per minute; `429` with `Retry-After`, delivered inside OHTTP |
 | Chain follower | §6.1 | Follows Zaino or lightwalletd with `GetLatestBlock` and `GetBlockRange` only; checks the network (by `chain_name` and Sapling's activation height, since Zaino reports regtest as `"test"`); rolls back reorgs up to 100 blocks and starts over at the tip on deeper ones; keeps `tip` current and announces each block to the rest of the server |
 | Wake-up scheduler | §5.1, §5.3 | Every 30 min on the half hour, spread over 5 min; RFC 8291 encryption, VAPID signed with the key each device's subscription is bound to, `TTL`/`Urgency`/`Topic`; drops devices on `404`/`410`; honors a gateway's `429` `Retry-After` (capped at 24 h) |
@@ -45,6 +45,14 @@ scanning also against real Zebra and Zaino on regtest
 - **Live account loading for `new-account`.** Accounts the CLI adds take
   effect after a restart; accounts made through the issuer socket are live
   at once.
+- **Scanner in its own process.** Viewing keys share a process with the
+  OHTTP gateway, the API, and the outbound push client, and every restart
+  drops all leases, so payments that arrive before each wallet's next wake
+  get no instant alert. A separate scanner process behind a narrow
+  interface (set and end leases, stream events) would shrink what a
+  breach of the network-facing code exposes, let the API restart without
+  dropping leases, and is the way to scanning in an attested enclave
+  (`attestation` in `info`). Planned after phase 1.
 - **Issuer types crate.** The issuer socket's request and answer types live
   in the server; a small shared crate can follow when an issuer wants to
   link against them.

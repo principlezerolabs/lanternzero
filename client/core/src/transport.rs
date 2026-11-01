@@ -136,6 +136,8 @@ pub struct HttpResponse<'a> {
     /// The `Retry-After` header, if any. Only used over Tor; over OHTTP it
     /// travels inside the encrypted response.
     pub retry_after: Option<&'a str>,
+    /// The `Date` header, if any. Only used over Tor, like `retry_after`.
+    pub date: Option<&'a str>,
     pub body: &'a [u8],
 }
 
@@ -144,6 +146,7 @@ impl std::fmt::Debug for HttpResponse<'_> {
         f.debug_struct("HttpResponse")
             .field("status", &self.status)
             .field("retry_after", &self.retry_after)
+            .field("date", &self.date)
             .field("body_len", &self.body.len())
             .finish()
     }
@@ -153,6 +156,8 @@ impl std::fmt::Debug for HttpResponse<'_> {
 pub(crate) struct Inner {
     pub status: u16,
     pub retry_after: Option<u64>,
+    /// The server's clock when it answered (spec §3.4), in Unix ms.
+    pub date_unix_ms: Option<u64>,
     pub body: Zeroizing<Vec<u8>>,
 }
 
@@ -178,6 +183,12 @@ fn split_base(base_url: &str) -> (&str, &str, &str) {
         Some(i) => (scheme, &rest[..i], &rest[i..]),
         None => (scheme, rest, ""),
     }
+}
+
+/// Parses an HTTP `Date` into Unix milliseconds.
+fn parse_date(value: &[u8]) -> Option<u64> {
+    let t = httpdate::parse_http_date(std::str::from_utf8(value).ok()?).ok()?;
+    u64::try_from(t.duration_since(UNIX_EPOCH).ok()?.as_millis()).ok()
 }
 
 fn http_date(now_unix_ms: u64) -> String {
@@ -276,6 +287,7 @@ pub(crate) fn open(opener: Opener, resp: HttpResponse<'_>) -> Result<Inner, Erro
         Opener::Direct => Ok(Inner {
             status: resp.status,
             retry_after: resp.retry_after.and_then(|v| v.trim().parse().ok()),
+            date_unix_ms: resp.date.and_then(|v| parse_date(v.as_bytes())),
             body: Zeroizing::new(resp.body.to_vec()),
         }),
         Opener::Ohttp(ctx) => {
@@ -307,9 +319,11 @@ pub(crate) fn open(opener: Opener, resp: HttpResponse<'_>) -> Result<Inner, Erro
                 .get(b"retry-after")
                 .and_then(|v| std::str::from_utf8(v).ok())
                 .and_then(|v| v.trim().parse().ok());
+            let date_unix_ms = msg.header().get(b"date").and_then(parse_date);
             Ok(Inner {
                 status,
                 retry_after,
+                date_unix_ms,
                 body: Zeroizing::new(msg.content().to_vec()),
             })
         }

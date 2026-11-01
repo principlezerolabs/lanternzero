@@ -148,10 +148,17 @@ async fn rejects_bad_requests() {
     );
     let r = h.send_raw(&old).await;
     assert_eq!((r.status, problem_slug(&r).as_str()), (400, "bad-date"));
+    // Dated, so the wallet can correct its clock (spec §3.4).
+    let date = httpdate::parse_http_date(r.date.as_deref().unwrap()).unwrap();
+    let off = now
+        .duration_since(date)
+        .or_else(|_| date.duration_since(now));
+    assert!(off.unwrap() < Duration::from_secs(5));
 
     let wrong_host = h.inner("POST", "evil.test", "/v0/info", None, now, None);
     let r = h.send_raw(&wrong_host).await;
     assert_eq!((r.status, problem_slug(&r).as_str()), (400, "bad-target"));
+    assert!(r.date.is_some(), "the gateway's own problems are dated too");
 
     // Unpadded, or padded with non-zero bytes: rejected (invariant 4).
     let mut short = h.inner("POST", HOST, "/v0/info", None, now, None);

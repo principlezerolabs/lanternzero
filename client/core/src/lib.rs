@@ -76,6 +76,12 @@ pub enum Error {
     /// `min_seq`: build the same request again and send it once more.
     #[error("stale seq; send the request again")]
     StaleSeq,
+    /// The device's clock was more than 60 s off the server's (spec §3.4).
+    /// The client has corrected for it from the server's answer: build the
+    /// same request again and send it once more. Persist the
+    /// [`ClientState`] so the correction survives a restart.
+    #[error("device clock was off; corrected, send the request again")]
+    ClockCorrected,
     /// The server no longer knows this device (for example, its gateway
     /// reported the subscription gone). Register again.
     #[error("unknown device; register again")]

@@ -140,6 +140,7 @@ fn ok(body: &[u8]) -> HttpResponse<'_> {
     HttpResponse {
         status: 200,
         retry_after: None,
+        date: None,
         body,
     }
 }
@@ -514,6 +515,7 @@ fn refuses_responses_that_are_not_fixed_size_or_not_from_the_gateway() {
             HttpResponse {
                 status: 502,
                 retry_after: None,
+                date: None,
                 body: b"bad gateway"
             }
         ),
@@ -589,6 +591,7 @@ fn onion_requests_go_direct_and_secrets_stay_out_of_debug() {
     let resp = HttpResponse {
         status: 200,
         retry_after: None,
+        date: None,
         body: &body,
     };
     assert!(!format!("{resp:?}").contains("e1"), "body in Debug");
@@ -734,4 +737,12 @@ fn deleting_an_old_device_record_keeps_the_current_one() {
     let reply = seen.answer(204, &Value::Null, None);
     c.finish_unregister(p, ok(&reply)).unwrap();
     assert_eq!(c.state().device_id.as_deref(), Some("dev-1"));
+}
+
+#[test]
+fn state_saved_before_clock_correction_still_loads() {
+    let old = r#"{"device_id":"d","cursor":"7","vapid_public_key":null,"last_seq":5}"#;
+    let state: ClientState = serde_json::from_str(old).unwrap();
+    assert_eq!(state.clock_offset_ms, 0);
+    assert_eq!(state.last_seq, Some(5));
 }

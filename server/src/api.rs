@@ -162,8 +162,22 @@ impl From<StoreError> for Problem {
     }
 }
 
-/// Rejects requests without a current `Date` header (spec §3.4).
+/// Rejects requests without a current `Date` header, and dates every
+/// response, so a wallet whose clock is off can correct it (spec §3.4).
 async fn require_date(req: Request, next: Next) -> Response {
+    let mut resp = check_date(req, next).await;
+    set_date(&mut resp);
+    resp
+}
+
+/// Sets `Date` to now, as an IMF-fixdate (always 29 bytes).
+pub(crate) fn set_date(resp: &mut Response) {
+    if let Ok(v) = header::HeaderValue::from_str(&httpdate::fmt_http_date(SystemTime::now())) {
+        resp.headers_mut().insert(header::DATE, v);
+    }
+}
+
+async fn check_date(req: Request, next: Next) -> Response {
     let ok = req
         .headers()
         .get(header::DATE)

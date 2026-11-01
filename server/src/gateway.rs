@@ -39,7 +39,8 @@ const MAX_INNER_BODY: usize = RESPONSE_SIZE;
 const DROPPED_INNER_HEADERS: &[&str] =
     &["content-length", "transfer-encoding", "host", "connection"];
 /// Inner response headers copied into the Binary HTTP response.
-const KEPT_RESPONSE_HEADERS: &[header::HeaderName] = &[header::CONTENT_TYPE, header::RETRY_AFTER];
+const KEPT_RESPONSE_HEADERS: &[header::HeaderName] =
+    &[header::CONTENT_TYPE, header::RETRY_AFTER, header::DATE];
 
 /// The outer router: the gateway, plus the API directly when `direct_api`
 /// is set (self-hosted onion services only).
@@ -236,7 +237,11 @@ async fn handle_inner(gw: &GatewayState, plain: Zeroizing<Vec<u8>>) -> Result<Re
 
 /// Encodes a response as padded known-length Binary HTTP, or `None` if it
 /// can't fit [`RESPONSE_SIZE`].
-async fn encode_response(resp: Response) -> Option<Vec<u8>> {
+async fn encode_response(mut resp: Response) -> Option<Vec<u8>> {
+    // The gateway's own problems (bad size, bad target) are dated too.
+    if !resp.headers().contains_key(header::DATE) {
+        crate::api::set_date(&mut resp);
+    }
     let (parts, body) = resp.into_parts();
     let body = axum::body::to_bytes(body, MAX_INNER_BODY).await.ok()?;
     let status = bhttp::StatusCode::try_from(parts.status.as_u16()).ok()?;

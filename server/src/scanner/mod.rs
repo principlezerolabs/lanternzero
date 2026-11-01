@@ -19,9 +19,11 @@
 //! - **Events** are per account, keyed by their deterministic id, and
 //!   deleted on acknowledgement or after [`EVENT_TTL`].
 //! - **Release rule** (spec §4.3): every new block, match, or reorg bumps a
-//!   counter that releases all waiting long-polls.
+//!   counter that releases all waiting long-polls, at most once every
+//!   [`MIN_RELEASE_GAP`].
 //!
 //! Layout: `leases` and `events` hold the [`Scanner`] methods for each;
+//! `release` spaces out long-poll releases;
 //! `decrypt` does trial decryption; `live` runs scanning, backfills, and
 //! instant pushes.
 
@@ -29,6 +31,7 @@ mod decrypt;
 mod events;
 mod leases;
 mod live;
+mod release;
 
 pub(crate) use decrypt::trial_decrypt_txs_refs;
 pub use decrypt::{Match, trial_decrypt, trial_decrypt_txs};
@@ -36,6 +39,7 @@ pub use live::{
     PAYMENT_PUSHES_PER_MINUTE, alert, backfill, run, scan_block, scan_block_at, scan_blocks,
     scan_blocks_at, sweep_loop,
 };
+pub use release::MIN_RELEASE_GAP;
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -121,7 +125,7 @@ pub struct Scanner {
     /// The current mempool in compact form, by txid. Public chain data, not
     /// key-derived.
     mempool: Mutex<MempoolSnapshot>,
-    release: watch::Sender<u64>,
+    release: Arc<release::Release>,
     backfills: Arc<Semaphore>,
 }
 
@@ -156,7 +160,7 @@ impl Scanner {
             secret,
             inner: Mutex::new(Inner::default()),
             mempool: Mutex::new(MempoolSnapshot::default()),
-            release: watch::channel(0).0,
+            release: release::Release::new(),
             backfills: Arc::new(Semaphore::new(MAX_CONCURRENT_BACKFILLS)),
         }
     }
@@ -215,9 +219,10 @@ impl Scanner {
             .collect()
     }
 
-    /// Releases every waiting long-poll (spec §4.3).
+    /// Releases every waiting long-poll (spec §4.3): now, or once
+    /// [`MIN_RELEASE_GAP`] has passed since the last release.
     pub fn release(&self) {
-        self.release.send_modify(|g| *g = g.wrapping_add(1));
+        self.release.trigger();
     }
 
     pub fn subscribe_release(&self) -> watch::Receiver<u64> {

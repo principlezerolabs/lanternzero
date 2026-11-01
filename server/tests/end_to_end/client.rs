@@ -49,6 +49,7 @@ fn reply(r: &(u16, Vec<u8>)) -> HttpResponse<'_> {
     HttpResponse {
         status: r.0,
         retry_after: None,
+        date: None,
         body: &r.1,
     }
 }
@@ -590,4 +591,32 @@ async fn ohttp_key_rotation_through_the_client_core() {
     let p = c.wake(now_ms(), None).unwrap();
     let r = relay(&h, p.request()).await;
     c.finish_wake(p, reply(&r)).unwrap();
+}
+
+#[tokio::test]
+async fn a_wallet_with_a_slow_clock_corrects_it_from_the_server() {
+    let h = harness(true);
+    let config = KeyConfig::from_two_relays(&h.key_config().await, &h.key_config().await).unwrap();
+    let mut c = Client::new(
+        connection(&h),
+        Network::Main,
+        Transport::Ohttp(config),
+        ClientState::default(),
+    )
+    .unwrap();
+    // Five minutes slow, as after the user set the time by hand.
+    let slow = || now_ms() - 300_000;
+
+    let p = c.info(slow()).unwrap();
+    let r = relay(&h, p.request()).await;
+    assert_eq!(c.finish_info(p, reply(&r)), Err(Error::ClockCorrected));
+    let offset = c.state().clock_offset_ms;
+    assert!((298_000..=302_000).contains(&offset), "{offset}");
+
+    // The same request again goes through, and so does the next one.
+    for _ in 0..2 {
+        let p = c.info(slow()).unwrap();
+        let r = relay(&h, p.request()).await;
+        c.finish_info(p, reply(&r)).unwrap();
+    }
 }
