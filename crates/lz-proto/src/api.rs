@@ -89,7 +89,10 @@ pub struct SeqOnly {
 /// is what default-mode wallets always send.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WakeRequest {
-    pub device_id: String,
+    /// The registered device, or `None` for a client without one, such as
+    /// a merchant backend (spec §4.2).
+    #[serde(default)]
+    pub device_id: Option<String>,
     pub seq: u64,
     pub ack: Vec<String>,
     pub lease: Option<LeaseRequest>,
@@ -123,7 +126,9 @@ pub struct WakeResponse {
 /// `POST /v0/events` (spec §4.3).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EventsRequest {
-    pub device_id: String,
+    /// As in [`WakeRequest::device_id`].
+    #[serde(default)]
+    pub device_id: Option<String>,
     pub seq: u64,
     pub cursor: String,
     pub wait: u32,
@@ -191,7 +196,8 @@ impl std::fmt::Debug for Event {
 }
 
 /// Webhook delivery body (spec §4.5): the event plus merchant fields.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// Derived from a key, so `Debug` hides the payment details.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WebhookDelivery {
     #[serde(flatten)]
     pub event: Event,
@@ -201,6 +207,15 @@ pub struct WebhookDelivery {
     pub memo: Option<String>,
 }
 
+impl std::fmt::Debug for WebhookDelivery {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WebhookDelivery")
+            .field("event", &self.event)
+            .field("pool", &self.pool)
+            .finish_non_exhaustive()
+    }
+}
+
 /// `PUT /v0/webhook`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WebhookConfig {
@@ -208,10 +223,18 @@ pub struct WebhookConfig {
     pub url: String,
 }
 
-/// Returned once by `PUT /v0/webhook`. `Debug` hides the secret.
+/// Returned once by `PUT /v0/webhook`: the signing secret in
+/// [`crate::webhook::SigningSecret::encode`]'s form. `Debug` hides it, and
+/// it is zeroed on drop.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WebhookSecret {
     pub secret: String,
+}
+
+impl Drop for WebhookSecret {
+    fn drop(&mut self) {
+        zeroize::Zeroize::zeroize(&mut self.secret);
+    }
 }
 
 impl std::fmt::Debug for WebhookSecret {
@@ -298,7 +321,7 @@ mod tests {
     #[test]
     fn default_wake_matches_spec_shape() {
         let w = WakeRequest {
-            device_id: "d".into(),
+            device_id: Some("d".into()),
             seq: 42,
             ack: vec![],
             lease: None,
@@ -307,6 +330,44 @@ mod tests {
             serde_json::to_string(&w).unwrap(),
             r#"{"device_id":"d","seq":42,"ack":[],"lease":null}"#
         );
+    }
+
+    #[test]
+    fn device_id_may_be_absent_or_null() {
+        let absent: WakeRequest =
+            serde_json::from_str(r#"{"seq":1,"ack":[],"lease":null}"#).unwrap();
+        assert_eq!(absent.device_id, None);
+        let null: EventsRequest =
+            serde_json::from_str(r#"{"device_id":null,"seq":1,"cursor":"0","wait":25,"ack":[]}"#)
+                .unwrap();
+        assert_eq!(null.device_id, None);
+    }
+
+    #[test]
+    fn webhook_types_hide_their_contents() {
+        let d = WebhookDelivery {
+            event: Event {
+                id: "e".into(),
+                rev: 1,
+                kind: EventKind::Received,
+                status: EventStatus::Mined,
+                height: Some(5),
+                confirmations: 1,
+                compact_tx: None,
+            },
+            txid: "aabbccdd".into(),
+            pool: Pool::Orchard,
+            amount: 123_456_789,
+            memo: Some("bWVtbw".into()),
+        };
+        let dbg = format!("{d:?}");
+        for hidden in ["aabbccdd", "123456789", "bWVtbw"] {
+            assert!(!dbg.contains(hidden), "{dbg}");
+        }
+        let s = WebhookSecret {
+            secret: "whsec_c2VjcmV0".into(),
+        };
+        assert!(!format!("{s:?}").contains("c2VjcmV0"));
     }
 
     #[test]
@@ -324,7 +385,7 @@ mod tests {
     fn largest_wake_fits_request_size() {
         let key = format!("uview1{}", "q".repeat(600));
         let w = WakeRequest {
-            device_id: "x".repeat(32),
+            device_id: Some("x".repeat(32)),
             seq: u64::MAX,
             ack: vec!["A".repeat(22); 4],
             lease: Some(LeaseRequest {

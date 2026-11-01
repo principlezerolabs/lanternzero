@@ -99,5 +99,41 @@
     "secret_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
     "sha256_hex": "280686787146dc1ce2ee30df6fa7b015aee2fd51a570d675e121859c7cd3d6eb",
     "text": "lzt_AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh-RJn6K"
+  },
+  "webhook": {
+    "event_id": "GqEwX5R_h48aU_8v-JMtPw",
+    "ids": [
+      {
+        "confirmations": 0,
+        "height": null,
+        "status": "mempool",
+        "webhook_id": "GqEwX5R_h48aU_8v-JMtPw.CDIhhjMVxK_1"
+      },
+      {
+        "confirmations": 1,
+        "height": 3500000,
+        "status": "mined",
+        "webhook_id": "GqEwX5R_h48aU_8v-JMtPw._RW-O43ePg0D"
+      },
+      {
+        "confirmations": 10,
+        "height": 3500000,
+        "status": "mined",
+        "webhook_id": "GqEwX5R_h48aU_8v-JMtPw.9D9bTGYoTaQC"
+      },
+      {
+        "confirmations": 0,
+        "height": null,
+        "status": "reorged",
+        "webhook_id": "GqEwX5R_h48aU_8v-JMtPw.rbBGqI0ELHOZ"
+      }
+    ],
+    "secret": "whsec_QEFCQ0RFRkdISUpLTE1OT1BRUlNUVVZXWFlaW1xdXl8=",
+    "signature": {
+      "body": "{\"id\":\"example\"}",
+      "header": "v1,SEcRK+YZOo2tlCKBZO/A+gBM20OnNLrS+0gmqKmMM6k=",
+      "timestamp": 1800000000,
+      "webhook_id": "GqEwX5R_h48aU_8v-JMtPw._RW-O43ePg0D"
+    }
   }
 }

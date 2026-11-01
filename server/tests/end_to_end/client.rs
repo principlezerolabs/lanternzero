@@ -620,3 +620,69 @@ async fn a_wallet_with_a_slow_clock_corrects_it_from_the_server() {
         c.finish_info(p, reply(&r)).unwrap();
     }
 }
+
+#[tokio::test]
+async fn a_merchant_backend_leases_without_a_device() {
+    let chain = fake_lwd::genesis();
+    chain.lock().unwrap().build(1, 100, 1);
+    let url = fake_lwd::serve(chain.clone()).await;
+    let h = harness_full(true, LimitsConfig::default(), Some(url));
+    sync_tip(&h).await;
+    let config = KeyConfig::from_two_sources(&h.key_config().await, &h.key_config().await).unwrap();
+    let mut shop = Client::new(
+        connection(&h),
+        Network::Main,
+        Transport::Ohttp(config),
+        ClientState::default(),
+    )
+    .unwrap()
+    .without_device();
+
+    // No registration: the lease goes straight on a `wake`.
+    let alice = Wallet::new(3);
+    let lease = || LeaseRequest {
+        keys: vec![ViewingKey::new(alice.uivk_main())],
+        from_height: 95,
+        duration_secs: 604_800,
+        spend_alerts: false,
+        alert_mode: AlertMode::Private,
+    };
+    let p = shop.wake(now_ms(), Some(lease())).unwrap();
+    let r = relay(&h, p.request()).await;
+    let w = shop.finish_wake(p, reply(&r)).unwrap();
+    assert!(w.lease.active);
+    assert_eq!(shop.state().device_id, None);
+    assert!(h.state.store.devices().is_empty());
+
+    // A payment arrives; the long-poll without a device returns it.
+    let p = shop.poll(now_ms()).unwrap();
+    let held = {
+        let h = h.fork();
+        let req = p.request().clone();
+        tokio::spawn(async move { relay(&h, &req).await })
+    };
+    let b = block(
+        101,
+        vec![tx(
+            0xB1,
+            vec![],
+            vec![action(&alice.orchard, 9, false)],
+            vec![],
+        )],
+    );
+    lz_server::scanner::scan_block(&h.state, Arc::new(b)).await;
+    let r = held.await.unwrap();
+    let out = shop.finish_poll(p, reply(&r)).unwrap();
+    assert_eq!(out.events.len(), 1);
+    assert_eq!(out.events[0].height, Some(101));
+
+    // `seq` went to the account's window, not a device's: the same value
+    // again is refused there.
+    let account = h
+        .state
+        .store
+        .authenticate(&TokenHash::of_text(&h.token))
+        .unwrap();
+    let last = shop.state().last_seq.unwrap();
+    assert!(h.state.store.accept_account_seq(account, last).is_err());
+}

@@ -1,6 +1,8 @@
-# Fixtures in server/src/webpush.rs (RFC 8291 vector, RFC 7519 JWT header).
+# Fixtures in server/src/webpush.rs (RFC 8291 vector, RFC 7519 JWT header),
+# and webhook secrets (`whsec_` + base64) in spec/vectors/v0.json.
 [default]
 extend-ignore-re = [
   "SRpkNtoIAiw4",
   '"typ":"JWT"',
+  "whsec_[A-Za-z0-9+/=]+",
 ]

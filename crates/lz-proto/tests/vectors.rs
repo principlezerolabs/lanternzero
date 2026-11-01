@@ -4,11 +4,13 @@
 //! To regenerate after an intentional change:
 //! `LZ_REGEN_VECTORS=1 cargo test -p lz-proto --test vectors`
 
+use lz_proto::api::EventStatus;
 use lz_proto::event_id::{Pool, event_id};
 use lz_proto::lease::clamp_duration;
 use lz_proto::padding::pad_ping_json;
 use lz_proto::replay::SeqWindow;
 use lz_proto::token::AccountToken;
+use lz_proto::webhook::{SECRET_LEN, SigningSecret, sign, webhook_id};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
@@ -50,6 +52,27 @@ fn generate() -> Value {
         .map(|s| json!({ "seq": s, "accepted": w.accept(s).is_ok() }))
         .collect();
 
+    let event = &ids[0]["id"].as_str().unwrap().to_owned();
+    let states: Vec<Value> = [
+        (EventStatus::Mempool, None, 0u32),
+        (EventStatus::Mined, Some(3_500_000u64), 1),
+        (EventStatus::Mined, Some(3_500_000), 10),
+        (EventStatus::Reorged, None, 0),
+    ]
+    .into_iter()
+    .map(|(status, height, confirmations)| {
+        json!({
+            "status": status, "height": height, "confirmations": confirmations,
+            "webhook_id": webhook_id(event, status, height, confirmations),
+        })
+    })
+    .collect();
+    let mut secret_bytes = [0u8; SECRET_LEN];
+    secret_bytes.copy_from_slice(&seq(0x40, SECRET_LEN));
+    let signing = SigningSecret::from_bytes(secret_bytes);
+    let signed_id = webhook_id(event, EventStatus::Mined, Some(3_500_000), 1);
+    let body = r#"{"id":"example"}"#;
+
     let ping_json = r#"{"v":0,"t":"wake","events":[]}"#;
     let ping = pad_ping_json(ping_json).unwrap();
 
@@ -65,6 +88,17 @@ fn generate() -> Value {
             "account_id_hex": hex::encode(account),
             "txid_hex": hex::encode(txid),
             "cases": ids,
+        },
+        "webhook": {
+            "event_id": event,
+            "ids": states,
+            "secret": signing.encode().as_str(),
+            "signature": {
+                "webhook_id": signed_id,
+                "timestamp": 1_800_000_000u64,
+                "body": body,
+                "header": sign(&signing, &signed_id, 1_800_000_000, body.as_bytes()),
+            },
         },
         "replay_window": { "window": lz_proto::replay::WINDOW, "steps": replay },
         "lease_duration": [

@@ -242,6 +242,25 @@ fn limit_device(state: &AppState, device_id: &str) -> Result<(), Problem> {
         .map_err(Problem::rate_limited)
 }
 
+/// Checks `seq` for a `wake` or `events` request: against the device's
+/// window, after the device rate limit, or, from a client without a device
+/// (`device_id: null`), against the account's (spec §3.4, §4.2).
+fn accept_client_seq(
+    state: &AppState,
+    account: AccountId,
+    device_id: Option<&str>,
+    seq: u64,
+) -> Result<(), Problem> {
+    match device_id {
+        Some(id) => {
+            limit_device(state, id)?;
+            state.store.accept_device_seq(account, id, seq)?;
+        }
+        None => state.store.accept_account_seq(account, seq)?,
+    }
+    Ok(())
+}
+
 pub(crate) fn parse<T: DeserializeOwned>(body: &Bytes) -> Result<T, Problem> {
     serde_json::from_slice(body).map_err(|_| Problem::bad_request("malformed JSON body"))
 }
@@ -353,10 +372,7 @@ async fn wake(
 ) -> Result<Response, Problem> {
     let account = authenticate(&state, &headers)?;
     let req: WakeRequest = parse_zero(body)?;
-    limit_device(&state, &req.device_id)?;
-    state
-        .store
-        .accept_device_seq(account, &req.device_id, req.seq)?;
+    accept_client_seq(&state, account, req.device_id.as_deref(), req.seq)?;
     state.scanner.ack(account, &req.ack);
     let now = SystemTime::now();
     match &req.lease {
@@ -452,10 +468,7 @@ async fn events(
 ) -> Result<Response, Problem> {
     let account = authenticate(&state, &headers)?;
     let req: EventsRequest = parse(&body)?;
-    limit_device(&state, &req.device_id)?;
-    state
-        .store
-        .accept_device_seq(account, &req.device_id, req.seq)?;
+    accept_client_seq(&state, account, req.device_id.as_deref(), req.seq)?;
     state.scanner.ack(account, &req.ack);
     let after: u64 = req
         .cursor

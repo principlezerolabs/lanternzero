@@ -57,6 +57,8 @@ pub struct Client {
     more: bool,
     acks: Vec<String>,
     seen: HashMap<String, (u32, EventStatus, Option<u64>, u32)>,
+    /// A client without a device (spec §4.2): see [`Client::without_device`].
+    without_device: bool,
 }
 
 impl std::fmt::Debug for Client {
@@ -182,7 +184,19 @@ impl Client {
             more: false,
             acks: Vec::new(),
             seen: HashMap::new(),
+            without_device: false,
         })
+    }
+
+    /// A client without a device, such as a merchant backend (spec §4.2):
+    /// `wake` and `poll` send `device_id: null` and need no registration.
+    /// Nothing pushes to it, so call `wake` with the lease every
+    /// `wake_interval_secs` from `info` (30 minutes), with `from_height` at
+    /// most the previous `tip` less the finality depth; a server restart
+    /// then costs at most one interval.
+    pub fn without_device(mut self) -> Self {
+        self.without_device = true;
+        self
     }
 
     /// What to persist after each call.
@@ -358,7 +372,7 @@ impl Client {
             l.validate(self.network)?;
         }
         let mut req = WakeRequest {
-            device_id: self.device_id()?.to_owned(),
+            device_id: self.request_device()?,
             seq: self.seq(now_unix_ms),
             ack: self.acks.clone(),
             lease,
@@ -405,7 +419,7 @@ impl Client {
     /// are waiting, a `wait: 0` fetch of that page. Call it in a loop while
     /// the app is in the foreground, in both modes.
     pub fn poll(&mut self, now_unix_ms: u64) -> Result<PendingEvents, Error> {
-        let device_id = self.device_id()?.to_owned();
+        let device_id = self.request_device()?;
         let cursor = self.state.cursor.clone().ok_or(Error::NoCursor)?;
         let mut req = EventsRequest {
             device_id,
@@ -509,6 +523,16 @@ impl Client {
         self.acks.clear();
         self.seen.clear();
         Ok(())
+    }
+
+    /// The `device_id` for `wake` and `events`: the registered device, or
+    /// none for a client [`without_device`](Self::without_device).
+    fn request_device(&self) -> Result<Option<String>, Error> {
+        if self.without_device {
+            Ok(None)
+        } else {
+            self.device_id().map(|d| Some(d.to_owned()))
+        }
     }
 
     fn device_id(&self) -> Result<&str, Error> {

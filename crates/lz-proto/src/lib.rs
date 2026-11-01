@@ -16,6 +16,7 @@ pub mod problem;
 pub mod replay;
 pub mod token;
 pub mod url;
+pub mod webhook;
 
 /// The API version this crate implements; also the path prefix (`/v0/`).
 pub const VERSION: &str = "v0";
