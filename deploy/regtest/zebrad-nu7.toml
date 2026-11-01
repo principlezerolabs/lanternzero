@@ -1,0 +1,32 @@
+# Zebra on a private regtest chain with NU7, for tests. Not for real funds.
+
+[network]
+network = "Regtest"
+listen_addr = "127.0.0.1:18344"
+cache_dir = false
+
+# Zebra 7.0.0 activates only Canopy on regtest by default. NU6.3 at height 1
+# turns on NU5, NU6, NU6.1, and NU6.3 (Orchard and Ironwood) from the start.
+# This variant also activates NU7 at height 10, so tests cross the upgrade
+# boundary the way mainnet will (at 3,543,405).
+[network.testnet_parameters.activation_heights]
+NU5 = 1
+NU6 = 1
+"NU6.1" = 1
+"NU6.3" = 1
+NU7 = 10
+
+[mining]
+# The test wallet's Sapling address (`Wallet::new(1)` in
+# server/tests/common/wallet.rs; `print_regtest_addresses` prints it).
+# Block rewards are then payments the scanner should find. A fake key from
+# a fixed seed: regtest only.
+miner_address = "uregtest1zy9svyj78ymmm2ncwvpz8jm8zn9kz3dqkhgz4kzxsh40lw2ndj0knlm598s8pj4gm3q27zx6leela5ejqccz34a0tfap2c3u5v5zqe57"
+
+[state]
+ephemeral = true
+
+[rpc]
+listen_addr = "0.0.0.0:18232"
+# Regtest on a private Docker network, with the port bound to loopback.
+enable_cookie_auth = false

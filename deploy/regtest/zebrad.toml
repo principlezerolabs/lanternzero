@@ -7,6 +7,7 @@ cache_dir = false
 
 # Zebra 7.0.0 activates only Canopy on regtest by default. NU6.3 at height 1
 # turns on NU5, NU6, NU6.1, and NU6.3 (Orchard and Ironwood) from the start.
+# NU7 stays off here; zebrad-nu7.toml turns it on (see README).
 [network.testnet_parameters.activation_heights]
 NU5 = 1
 NU6 = 1

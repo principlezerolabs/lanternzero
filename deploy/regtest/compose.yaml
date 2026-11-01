@@ -11,7 +11,8 @@ services:
     # zfnd/zebra:7.0.0
     image: zfnd/zebra@sha256:a70d2be8ffef3a4b6e37355724e36a0e6c1838e46baa28bfb216739f00cf2d34
     volumes:
-      - ./zebrad.toml:/home/zebra/.config/zebrad.toml:ro
+      # ZEBRA_CONFIG=zebrad-nu7.toml activates NU7 at height 10 (see README).
+      - ./${ZEBRA_CONFIG:-zebrad.toml}:/home/zebra/.config/zebrad.toml:ro
     ports:
       - "127.0.0.1:18232:18232"
     healthcheck:

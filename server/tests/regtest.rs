@@ -282,3 +282,87 @@ async fn mempool_stream_ends_at_the_next_block() {
         .unwrap();
     println!("mempool stream sent {n} transactions, then ended");
 }
+
+/// NU7 activates at height 10 on the regtest kit (3,543,405 on mainnet).
+/// Zaino must follow across it, report the NU7 branch id, and the scanner
+/// must find payments on both sides of the boundary.
+#[tokio::test]
+#[ignore]
+async fn crosses_the_nu7_boundary() {
+    if std::env::var("LZ_REGTEST_NU7").is_err() {
+        println!(
+            "skipped: start the kit with ZEBRA_CONFIG=zebrad-nu7.toml and set LZ_REGTEST_NU7=1"
+        );
+        return;
+    }
+    let state = state();
+    let source = state.chain_source.clone().unwrap();
+    let mut tip = zebra("getblockcount", json!([])).await.as_u64().unwrap();
+    if tip < 15 {
+        tip = mine((15 - tip) as u32).await;
+    }
+    zaino_at(&source, tip).await;
+    assert_eq!(
+        source.consensus_branch_id().await.unwrap(),
+        zcash_protocol::consensus::BranchId::Nu7
+    );
+    let info = source.info().await.unwrap();
+    println!(
+        "after NU7: upgrade {} at {}",
+        info.upgrade_name, info.upgrade_height
+    );
+
+    // Every block from 5 to the tip pays the test wallet; all are found.
+    tokio::spawn(lz_server::chain::run(
+        state.chain.clone(),
+        source.clone(),
+        Network::Regtest,
+        Duration::from_secs(1),
+    ));
+    for _ in 0..60 {
+        if state.chain.tip() >= tip {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    let w = Wallet::new(1);
+    let req = LeaseRequest {
+        keys: vec![ViewingKey::new(
+            w.uivk(NetworkType::Regtest, zcash_address::unified::Revision::R0),
+        )],
+        from_height: 5,
+        duration_secs: 604_800,
+        spend_alerts: false,
+        alert_mode: AlertMode::Private,
+    };
+    let keys = ScanKeys::decode(&req.keys, Network::Regtest).unwrap();
+    let account = [7u8; 16];
+    let bf = state
+        .scanner
+        .set_lease(
+            account,
+            keys,
+            &req,
+            Duration::from_secs(604_800),
+            tip,
+            std::time::SystemTime::now(),
+        )
+        .unwrap();
+    scanner::backfill(state.clone(), bf).await;
+    let mut found: Vec<u64> = Vec::new();
+    let mut after = None;
+    loop {
+        let page = state.scanner.page(account, after, 3500);
+        found.extend(page.events.iter().filter_map(|e| e.height));
+        if !page.more {
+            break;
+        }
+        after = Some(page.cursor);
+    }
+    found.sort_unstable();
+    assert_eq!(
+        found,
+        (5..=tip).collect::<Vec<_>>(),
+        "a reward in every block, before and after NU7"
+    );
+}

@@ -195,3 +195,32 @@ async fn unreachable_source_is_an_error_not_a_panic() {
     let mut f = Follower::new(Arc::new(Chain::default()), source);
     assert!(matches!(f.step().await, Err(ChainError::Rpc(_))));
 }
+
+#[test]
+fn warns_when_the_tip_stops_moving() {
+    use lz_server::chain::{STALL_WARNING, StallWatch};
+    use std::time::{Duration, Instant};
+    let t0 = Instant::now();
+    let mut w = StallWatch::new(t0);
+    assert_eq!(w.check(10, t0), None);
+    assert_eq!(
+        w.check(10, t0 + STALL_WARNING - Duration::from_secs(1)),
+        None
+    );
+    assert_eq!(w.check(10, t0 + STALL_WARNING), Some(10));
+    // Once per interval while stuck, not on every poll.
+    assert_eq!(
+        w.check(10, t0 + STALL_WARNING + Duration::from_secs(5)),
+        None
+    );
+    assert_eq!(w.check(10, t0 + 2 * STALL_WARNING), Some(20));
+    // A new block resets it.
+    assert_eq!(
+        w.check(11, t0 + 2 * STALL_WARNING + Duration::from_secs(1)),
+        None
+    );
+    assert_eq!(
+        w.check(11, t0 + 2 * STALL_WARNING + Duration::from_secs(2)),
+        None
+    );
+}

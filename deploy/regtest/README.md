@@ -23,6 +23,24 @@ CI runs the same steps on every push.
 - `GetMempoolStream` stays open while the mempool is empty and ends when a
   block is mined.
 
+## NU7
+
+NU7 activates on mainnet at height 3,543,405. To test across the upgrade,
+start the kit with the NU7 variant, which activates it at height 10:
+
+```sh
+ZEBRA_CONFIG=zebrad-nu7.toml docker compose -f deploy/regtest/compose.yaml up -d --wait
+LZ_REGTEST_NU7=1 cargo test -p lz-server --test regtest -- --ignored --test-threads 1 crosses_the_nu7_boundary
+```
+
+**Known failure (2026-11-01):** Zaino 0.10.1 and 0.10.2 stop at the last
+pre-NU7 block, logging `invalid consensus branch id`. They depend on
+`zcash_protocol` 0.10, where NU7's branch id is still a placeholder
+(`0xffff_ffff`); the real id, `0x77190ad9`, arrived in 0.11. Zebra 7.0.0
+handles the upgrade, and so does our server: its follower just sees the tip
+stop, and warns after 10 minutes. A CI canary job (`regtest-nu7`, allowed to
+fail) runs this test, so a fixed Zaino shows up as soon as it's pinned here.
+
 ## Notes
 
 - **Activation heights.** Zebra 7.0.0 activates only Canopy on regtest by

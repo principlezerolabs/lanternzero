@@ -249,10 +249,19 @@ pub fn network_of(chain_name: &str, sapling_activation: u64) -> Option<Network> 
 /// Follows the chain until the process exits. Errors are logged and
 /// retried with back-off; the server keeps serving meanwhile.
 pub async fn run(chain: Arc<Chain>, source: Lightwalletd, network: Network, poll: Duration) {
-    let mut follower = Follower::new(chain, source);
+    let mut follower = Follower::new(chain.clone(), source);
     let mut backoff = Duration::from_secs(1);
     let mut network_ok = false;
+    let mut stall = StallWatch::new(std::time::Instant::now());
     loop {
+        if let Some(minutes) = stall.check(chain.tip(), std::time::Instant::now()) {
+            tracing::warn!(
+                tip = chain.tip(),
+                minutes,
+                "chain tip hasn't advanced; is the chain source stuck? (for example, a Zaino that \
+                 doesn't know the current network upgrade)"
+            );
+        }
         let result = if network_ok {
             follower.step().await
         } else {
@@ -273,6 +282,45 @@ pub async fn run(chain: Arc<Chain>, source: Lightwalletd, network: Network, poll
                 backoff = (backoff * 2).min(MAX_BACKOFF);
             }
         }
+    }
+}
+
+/// No new block for this long is worth a warning. Blocks come every 75 s,
+/// and every 25 s after NU7; ten minutes without one is far outside normal
+/// variance.
+pub const STALL_WARNING: Duration = Duration::from_secs(600);
+
+/// Notices when the tip stops moving, and says so once per
+/// [`STALL_WARNING`] while it stays stuck.
+#[derive(Debug)]
+pub struct StallWatch {
+    tip: u64,
+    since: std::time::Instant,
+    warned: std::time::Instant,
+}
+
+impl StallWatch {
+    pub fn new(now: std::time::Instant) -> Self {
+        Self {
+            tip: 0,
+            since: now,
+            warned: now,
+        }
+    }
+
+    /// Returns the minutes stalled when a warning is due.
+    pub fn check(&mut self, tip: u64, now: std::time::Instant) -> Option<u64> {
+        if tip != self.tip {
+            self.tip = tip;
+            self.since = now;
+            self.warned = now;
+            return None;
+        }
+        if now.duration_since(self.warned) < STALL_WARNING {
+            return None;
+        }
+        self.warned = now;
+        Some(now.duration_since(self.since).as_secs() / 60)
     }
 }
 
