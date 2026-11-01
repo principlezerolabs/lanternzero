@@ -5,7 +5,7 @@ bridge until Zcash's Tachyon upgrade changes how wallets find payments. Read
 `README.md` first for the user-facing description.
 
 **Status (2026-11-01): pre-alpha, phase 1 of 4: spec and prototype.** The
-draft protocol spec is `spec/v0.md` (rev 3.15); `crates/lz-proto` holds the
+draft protocol spec is `spec/v0.md` (rev 3.16); `crates/lz-proto` holds the
 shared protocol types; `server/` is a prototype (OHTTP gateway, devices,
 30-minute pings, chain follower, and the scanner with in-memory leases,
 events, hints, and long-poll); `gateway/`, `client/core`, and the
@@ -175,7 +175,11 @@ same copy. Treat a violation as a bug, and test for it.
   optional, because opt-in scanning covers fast iOS alerts.
 - Which servers the Tachyon team expects third parties to run: PIR
   databases, oblivious sync, or the introduction service. After Tachyon, the
-  scanner retires and the wake-up channel stays.
+  scanner retires and the wake-up channel stays. Valar Group already runs
+  Zcash PIR services (`valargroup/wallet-pir`: Enhance, Status, Receiver,
+  Transparent; YPIR-based); compare with them when this comes up. PIR
+  retrieves records a wallet already knows it wants, so it can't replace
+  the scanner's detection.
 
 ## Working rules
 
