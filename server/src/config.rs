@@ -125,8 +125,9 @@ impl Default for LimitsConfig {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PushConfig {
-    /// Allow push endpoints on private, loopback, or link-local addresses.
-    /// Only for self-hosting and tests (spec §4.1).
+    /// Allow push endpoints and webhook URLs on private, loopback, or
+    /// link-local addresses, and plain `http`. Only for self-hosting and
+    /// tests (spec §4.1, §4.5).
     #[serde(default)]
     pub allow_private_targets: bool,
     /// If not empty, accept only push endpoints on these hosts.

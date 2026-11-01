@@ -108,11 +108,13 @@ fn finds_payments_in_sapling_orchard_and_ironwood_only_for_their_owner() {
     let leases = vec![(A, Arc::new(keys(&alice)))];
     let mut found = trial_decrypt(&b, &leases);
     found.sort_by_key(|m| (m.tx, m.pool.code(), m.index));
+    // The test notes hold 7,000 (Sapling) and 5,000 (Orchard, Ironwood).
     let m = |tx, pool, index| Match {
         account: A,
         tx,
         pool,
         index,
+        value: if pool == Pool::Sapling { 7_000 } else { 5_000 },
     };
     assert_eq!(
         found,

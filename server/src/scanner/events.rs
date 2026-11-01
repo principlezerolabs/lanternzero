@@ -88,6 +88,12 @@ impl Scanner {
                             seq: acct.last_seq,
                             created: now,
                             json_len,
+                            payment: webhooks::Payment {
+                                txid,
+                                pool: m.pool,
+                                value: m.value,
+                            },
+                            delivery: webhooks::Delivery::default(),
                         },
                     );
                     track_unfinalized(&mut inner, m.account, &id, confirmations);
@@ -151,6 +157,12 @@ impl Scanner {
                             seq: acct.last_seq,
                             created: now,
                             json_len,
+                            payment: webhooks::Payment {
+                                txid,
+                                pool: m.pool,
+                                value: m.value,
+                            },
+                            delivery: webhooks::Delivery::default(),
                         },
                     );
                     maybe_trim_events(&mut inner, m.account);

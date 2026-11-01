@@ -61,6 +61,7 @@ impl Store {
         let mut st = self.state.lock().expect("store lock");
         st.scan_until
             .retain(|a, u| *u > now_unix && live.contains(a));
+        st.webhooks.retain(|a, _| live.contains(a));
         st.grants.retain(|_, g| g.at > cutoff);
         st.deletions.retain(|d| d.at > cutoff);
         let mut idle = Vec::new();

@@ -32,6 +32,7 @@ mod events;
 mod leases;
 mod live;
 mod release;
+mod webhooks;
 
 pub(crate) use decrypt::trial_decrypt_txs_refs;
 pub use decrypt::{Match, trial_decrypt, trial_decrypt_txs};
@@ -40,6 +41,7 @@ pub use live::{
     scan_blocks_at, sweep_loop,
 };
 pub use release::MIN_RELEASE_GAP;
+pub use webhooks::{Due, RETRY_WINDOW};
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -100,6 +102,11 @@ struct Stored {
     created: SystemTime,
     /// Cached JSON size for paging without reserializing under the lock.
     json_len: usize,
+    /// What a webhook delivery reports beyond the event (spec §4.5).
+    payment: webhooks::Payment,
+    /// Webhook delivery of the event's current state, on accounts with a
+    /// webhook (spec §4.5).
+    delivery: webhooks::Delivery,
 }
 
 #[derive(Default)]
@@ -241,9 +248,13 @@ fn maybe_trim_events(inner: &mut Inner, account: AccountId) {
         .get(&account)
         .is_some_and(|a| a.by_id.len() > MAX_EVENTS_PER_ACCOUNT)
     {
+        // Events still being delivered to a webhook are kept until delivered
+        // or given up on, so a merchant isn't silently denied a payment
+        // (spec §6.1). Until then the account may hold more than the cap.
         let drop_id = inner.events.get(&account).and_then(|acct| {
             acct.by_id
                 .iter()
+                .filter(|(_, s)| !s.delivery.is_pending())
                 .min_by_key(|(_, s)| (s.created, s.seq))
                 .map(|(id, _)| id.clone())
         });

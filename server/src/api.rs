@@ -9,10 +9,10 @@ use axum::extract::{Path, Request, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{delete, post};
+use axum::routing::{delete, post, put};
 use lz_proto::api::{
     DeviceRegistered, DeviceRegistration, EventsRequest, EventsResponse, Info, SeqOnly,
-    TokenRotate, WakeRequest, WakeResponse,
+    TokenRotate, WakeRequest, WakeResponse, WebhookConfig, WebhookSecret,
 };
 use lz_proto::lease::clamp_duration;
 use lz_proto::padding::RESPONSE_SIZE;
@@ -53,6 +53,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v0/events", post(events))
         .route("/v0/token/rotate", post(rotate_token))
         .route("/v0/account", delete(delete_account))
+        .route("/v0/webhook", put(put_webhook).delete(delete_webhook))
         .layer(middleware::from_fn(require_date))
         .with_state(state)
 }
@@ -529,6 +530,67 @@ async fn rotate_token(
             Err(Problem::internal())
         }
     }
+}
+
+/// Longest webhook URL, as for push endpoints (spec §4.1).
+const MAX_WEBHOOK_URL: usize = 1024;
+
+/// `PUT /v0/webhook` (spec §4.5): sets the account's webhook and returns a
+/// new signing secret, once. A scanning server only: webhooks deliver
+/// what leases find.
+async fn put_webhook(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Response, Problem> {
+    let account = authenticate(&state, &headers)?;
+    let req: WebhookConfig = parse(&body)?;
+    state.store.accept_account_seq(account, req.seq)?;
+    if state.chain_source.is_none() {
+        return Err(Problem::new(
+            StatusCode::NOT_IMPLEMENTED,
+            problem::SCANNING_UNAVAILABLE,
+            "this server does not offer scanning",
+        ));
+    }
+    let has_userinfo = req
+        .url
+        .parse::<axum::http::Uri>()
+        .ok()
+        .and_then(|u| u.authority().map(|a| a.as_str().contains('@')))
+        .unwrap_or(true);
+    if req.url.len() > MAX_WEBHOOK_URL
+        || has_userinfo
+        || ssrf::check_url(&req.url, state.config.push.allow_private_targets, &[]).is_err()
+    {
+        return Err(Problem::bad_request("webhook URL not allowed"));
+    }
+    let secret = lz_proto::webhook::SigningSecret::generate().map_err(|_| Problem::internal())?;
+    if let Err(e) = state.store.set_webhook(account, &req.url, &secret) {
+        tracing::error!(error = %e, "cannot store a webhook");
+        return Err(Problem::internal());
+    }
+    // A new secret starts deliveries afresh.
+    state.scanner.clear_webhook_deliveries(account);
+    let reply = WebhookSecret {
+        secret: secret.encode().to_string(),
+    };
+    Ok(json(StatusCode::OK, &reply))
+}
+
+/// `DELETE /v0/webhook` (spec §4.5).
+async fn delete_webhook(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Response, Problem> {
+    let account = authenticate(&state, &headers)?;
+    let SeqOnly { seq } = parse(&body)?;
+    state.store.accept_account_seq(account, seq)?;
+    if state.store.delete_webhook(account) {
+        state.scanner.clear_webhook_deliveries(account);
+    }
+    Ok(StatusCode::NO_CONTENT.into_response())
 }
 
 /// `DELETE /v0/account` (spec §4.6): drops the token hashes, devices,

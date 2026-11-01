@@ -114,6 +114,7 @@ async fn serve(config: Config) -> ExitCode {
             ));
             tokio::spawn(scanner::run(state.clone()));
             tokio::spawn(mempool::run(state.clone()));
+            tokio::spawn(lz_server::webhook::run(state.clone()));
         }
         _ => tracing::warn!("no [chain] configured: tip stays 0 and nothing is scanned"),
     }

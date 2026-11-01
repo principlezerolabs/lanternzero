@@ -216,6 +216,7 @@ impl Store {
             st.scan_until.remove(&id);
             st.last_active_day.remove(&id);
             st.grants.retain(|_, g| g.account != id);
+            st.webhooks.remove(&id);
             if self.log_deletions.load(Ordering::Relaxed) {
                 let seq = st.next_deletion + 1;
                 st.next_deletion = seq;

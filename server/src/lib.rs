@@ -34,6 +34,7 @@ pub mod scanner;
 pub mod ssrf;
 pub mod store;
 pub mod viewkey;
+pub mod webhook;
 pub mod webpush;
 
 use std::sync::Arc;

@@ -66,7 +66,8 @@ only when they change.
 
 ## Not yet
 
-- Webhooks: the server doesn't have them yet either.
+- Webhook calls (`PUT`/`DELETE /v0/webhook`). Receivers can verify
+  deliveries with `lz_proto::webhook::verify` today.
 - An optional `reqwest` feature that sends requests itself, for merchant
   backends.
 - Choosing relays. Relay addressing differs between relay software

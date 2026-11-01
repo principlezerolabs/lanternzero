@@ -19,6 +19,9 @@ pub struct Match {
     pub pool: Pool,
     /// Output (Sapling) or action (Orchard, Ironwood) index in its bundle.
     pub index: u32,
+    /// The note's value in zatoshis, for webhooks (spec §4.5). Derived
+    /// from a key: memory only (invariant 3).
+    pub value: u64,
 }
 
 /// Trial-decrypts every shielded output in `block` with each lease's keys.
@@ -96,6 +99,7 @@ pub(crate) fn trial_decrypt_txs_refs(
             &sapling_at,
             &sapling_owner,
             Pool::Sapling,
+            |(note, _)| note.value().inner(),
         );
     }
     if !orchard_ivks.is_empty() && !orchard_out.is_empty() {
@@ -105,6 +109,7 @@ pub(crate) fn trial_decrypt_txs_refs(
             &orchard_at,
             &orchard_owner,
             Pool::Orchard,
+            |(note, _)| note.value().inner(),
         );
     }
     if !orchard_ivks.is_empty() && !ironwood_out.is_empty() {
@@ -114,6 +119,7 @@ pub(crate) fn trial_decrypt_txs_refs(
             &ironwood_at,
             &orchard_owner,
             Pool::Ironwood,
+            |(note, _)| note.value().inner(),
         );
     }
     matches
@@ -125,14 +131,16 @@ fn record_hits<T>(
     at: &[(usize, usize)],
     owners: &[AccountId],
     pool: Pool,
+    value: impl Fn(&T) -> u64,
 ) {
     for (hit, &(tx, index)) in hits.iter().zip(at) {
-        if let Some((_, ivk_idx)) = hit.as_ref() {
+        if let Some((decrypted, ivk_idx)) = hit.as_ref() {
             matches.push(Match {
                 account: owners[*ivk_idx],
                 tx,
                 pool,
                 index: index as u32,
+                value: value(decrypted),
             });
         }
     }

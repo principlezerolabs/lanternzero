@@ -42,9 +42,11 @@ mod accounts;
 mod activity;
 mod devices;
 mod scan_time;
+mod webhooks;
 
 use accounts::{Entry, read_accounts};
 pub use devices::Device;
+pub use webhooks::Webhook;
 
 pub const ACCOUNTS_FILE: &str = "accounts.txt";
 const STATE_FILE: &str = "state.json";
@@ -90,6 +92,29 @@ struct State {
     /// The `seq` of the next deletion: never reused, so cursors stay valid.
     #[serde(default)]
     next_deletion: u64,
+    /// Each account's webhook, by account id hex (spec §4.5).
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    webhooks: HashMap<String, WebhookRecord>,
+}
+
+/// A webhook's URL and signing secret (`whsec_…`), as stored. `Debug`
+/// hides both, and the secret is zeroed on drop.
+#[derive(Clone, Serialize, Deserialize)]
+struct WebhookRecord {
+    url: String,
+    secret: String,
+}
+
+impl std::fmt::Debug for WebhookRecord {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("WebhookRecord(<redacted>)")
+    }
+}
+
+impl Drop for WebhookRecord {
+    fn drop(&mut self) {
+        zeroize::Zeroize::zeroize(&mut self.secret);
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

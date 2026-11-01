@@ -23,6 +23,7 @@ scanning also against real Zebra and Zaino on regtest
 | Scanner | §4.4, §6.1 | Trial decryption of Sapling outputs and Orchard and Ironwood actions in compact blocks, for every active lease; deterministic event ids; `mined` → `reorged` → re-mined; confirmations up to the finality depth; events deleted on ack or after 7 days; expired leases swept every minute; catches up after falling behind |
 | Mempool | §4.3, §6.1 | `GetMempoolStream`, reopened after each block; full transactions (v5 and v6) cut to `CompactTx` and trial-decrypted like blocks; matches are `mempool` events that become `mined` with the same id; a new lease is checked against the pending mempool, kept in compact form up to 64 MiB; an unknown branch id is logged, not fatal |
 | Payment alerts | §5.2 | `instant`: an extra `Urgency: high` push when a payment is first seen (usually in the mempool, seconds after it was sent), one per transaction, at most 2 a minute per account; `private`: up to 4 events inside the scheduled ping, same 1024-byte size. Backfilled payments don't push |
+| Webhooks | §4.5 | `PUT`/`DELETE /v0/webhook` on a scanning server; URL (https, at most 1024 bytes, no user info, SSRF rules) and `whsec_` secret kept in `state.json`. Every event delivered on each change, Standard Webhooks signed (`webhook-id` from the event's state), retried with backoff and jitter for 24 h; a final delivered event is deleted; `410` deletes the webhook; undelivered events are exempt from the event cap. Deliveries go out on each release and every 5 s |
 | Replay protection | §3.4 | `Date` within 60 s, and a `Date` on every response so wallets can correct their clocks; `seq` windows per device, or per account for registration, rotation, and deletion; `409 stale-seq` with `min_seq` |
 | Rate limits | §3.5 | Per account and per device, per minute; `429` with `Retry-After`, delivered inside OHTTP |
 | Chain follower | §6.1 | Follows Zaino or lightwalletd with `GetLatestBlock` and `GetBlockRange` only; checks the network (by `chain_name` and Sapling's activation height, since Zaino reports regtest as `"test"`); rolls back reorgs up to 100 blocks and starts over at the tip on deeper ones; keeps `tip` current and announces each block to the rest of the server |
@@ -38,7 +39,9 @@ scanning also against real Zebra and Zaino on regtest
   but the decoded Sapling and Orchard key types from the Zcash crates don't
   zero themselves on drop. Locked memory and no core dumps (below) keep
   them off disk meanwhile.
-- **Webhooks** (§4.5).
+- **Memos in webhooks.** Deliveries always have `memo: null`: compact
+  blocks carry no memo, and fetching the transaction by txid is ruled out
+  (invariant 7). Mempool transactions arrive in full and could supply it.
 - **More `doctor` checks** (deploy/DESIGN.md). `doctor` doesn't yet check
   that the onion service or OHTTP gateway answers from outside, or the
   clock beyond what the tip's age shows.

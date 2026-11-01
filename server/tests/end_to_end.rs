@@ -16,3 +16,5 @@ mod harness;
 mod protocol;
 #[path = "end_to_end/scanning.rs"]
 mod scanning;
+#[path = "end_to_end/webhooks.rs"]
+mod webhooks;
