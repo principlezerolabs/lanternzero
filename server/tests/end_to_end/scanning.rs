@@ -47,6 +47,7 @@ async fn scanning(height: u64) -> Scanning {
             p256dh: keys["p256dh"].as_str().unwrap().into(),
             auth: keys["auth"].as_str().unwrap().into(),
         },
+        vapid_public_key: None,
     };
     let device_id = h.state.store.register_device(account, &reg, 10).unwrap();
     Scanning {

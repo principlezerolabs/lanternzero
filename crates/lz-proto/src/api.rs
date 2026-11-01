@@ -68,6 +68,10 @@ pub struct DeviceRegistration {
     /// RFC 8030 push resource on the wallet vendor's gateway.
     pub endpoint: String,
     pub keys: PushKeys,
+    /// The server VAPID key the subscription is bound to, from `info`
+    /// (spec §4.1). Absent: the server's current key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vapid_public_key: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -369,6 +373,7 @@ mod tests {
                 p256dh: URL_SAFE_NO_PAD.encode(p256dh),
                 auth: URL_SAFE_NO_PAD.encode(auth),
             },
+            vapid_public_key: None,
         }
     }
 

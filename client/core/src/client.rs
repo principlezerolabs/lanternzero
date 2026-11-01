@@ -98,7 +98,7 @@ pending!(
 );
 pending!(
     /// A device deletion in flight.
-    PendingUnregister
+    PendingUnregister { device_id: String }
 );
 pending!(
     /// A token rotation in flight.
@@ -256,7 +256,10 @@ impl Client {
     }
 
     /// `POST /v0/devices` (spec §4.1) with an endpoint from the vendor's
-    /// gateway, bound to this server's VAPID key.
+    /// gateway, bound to this server's VAPID key as `info` last reported it
+    /// ([`ClientState::vapid_public_key`]). The registration names that
+    /// key, so a rotation in between can't strand the device; call
+    /// [`info`](Self::info) first.
     pub fn register(
         &mut self,
         now_unix_ms: u64,
@@ -267,6 +270,7 @@ impl Client {
             seq: self.seq(now_unix_ms),
             endpoint: endpoint.to_owned(),
             keys,
+            vapid_public_key: self.state.vapid_public_key.clone(),
         };
         reg.validate()?;
         let body = to_json(&reg)?;
@@ -282,14 +286,7 @@ impl Client {
     ) -> Result<String, Error> {
         let body = self.open(pending.ex, response, 201)?;
         let reg: DeviceRegistered = serde_json::from_slice(&body).map_err(|_| Error::Malformed)?;
-        // It goes into request paths.
-        let safe = !reg.device_id.is_empty()
-            && reg.device_id.len() <= 64
-            && reg
-                .device_id
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_');
-        if !safe {
+        if !valid_device_id(&reg.device_id) {
             return Err(Error::Malformed);
         }
         self.forget_device();
@@ -297,25 +294,47 @@ impl Client {
         Ok(reg.device_id)
     }
 
-    /// `DELETE /v0/devices/{device_id}` (spec §4.1). When the user removes
-    /// the server, the app also revokes the gateway subscription.
+    /// `DELETE /v0/devices/{device_id}` (spec §4.1) for this device. When
+    /// the user removes the server, the app also revokes the gateway
+    /// subscription.
     pub fn unregister(&mut self, now_unix_ms: u64) -> Result<PendingUnregister, Error> {
         let device_id = self.device_id()?.to_owned();
+        self.unregister_device(now_unix_ms, &device_id)
+    }
+
+    /// Deletes another device record of this account: the old one after
+    /// moving to a new subscription, for example when `info` reports a new
+    /// VAPID key (spec §5.3). Register the new one first, keeping the old
+    /// [`ClientState::device_id`], then delete the old one with this.
+    pub fn unregister_device(
+        &mut self,
+        now_unix_ms: u64,
+        device_id: &str,
+    ) -> Result<PendingUnregister, Error> {
+        if !valid_device_id(device_id) {
+            return Err(Error::NotRegistered);
+        }
         let body = to_json(&SeqOnly {
             seq: self.seq(now_unix_ms),
         })?;
         let path = format!("/v0/devices/{device_id}");
         let ex = self.exchange("DELETE", &path, true, now_unix_ms, Some(&body))?;
-        Ok(PendingUnregister { ex })
+        Ok(PendingUnregister {
+            ex,
+            device_id: device_id.to_owned(),
+        })
     }
 
+    /// Forgets this device if it was the one deleted.
     pub fn finish_unregister(
         &mut self,
         pending: PendingUnregister,
         response: HttpResponse<'_>,
     ) -> Result<(), Error> {
         self.open(pending.ex, response, 204)?;
-        self.forget_device();
+        if self.state.device_id.as_deref() == Some(pending.device_id.as_str()) {
+            self.forget_device();
+        }
         Ok(())
     }
 
@@ -567,6 +586,7 @@ impl Client {
                 Error::UnknownDevice
             }
             (409, "too-many-devices") => Error::TooManyDevices,
+            (400, "unknown-vapid-key") => Error::UnknownVapidKey,
             (429, _) => Error::RateLimited {
                 retry_after_secs: inner.retry_after,
             },
@@ -606,6 +626,15 @@ impl Client {
             })
             .collect()
     }
+}
+
+/// Device ids go into request paths: only short base64url-like text.
+fn valid_device_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 64
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
 }
 
 fn to_json<T: Serialize>(value: &T) -> Result<Zeroizing<Vec<u8>>, Error> {

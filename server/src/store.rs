@@ -41,6 +41,11 @@ pub struct Device {
     pub p256dh: String,
     pub auth: String,
     pub seq: SeqWindow,
+    /// The VAPID public key the gateway subscription is bound to (spec
+    /// §4.1, §5.3). `None` only for records from before keys rotated:
+    /// [`Store::pin_vapid`] sets them at start.
+    #[serde(default)]
+    pub vapid: Option<String>,
 }
 
 impl std::fmt::Debug for Device {
@@ -51,6 +56,7 @@ impl std::fmt::Debug for Device {
             .field("p256dh", &"<redacted>")
             .field("auth", &"<redacted>")
             .field("seq", &self.seq)
+            .field("vapid", &self.vapid)
             .finish()
     }
 }
@@ -407,6 +413,7 @@ impl Store {
                 p256dh: reg.keys.p256dh.clone(),
                 auth: reg.keys.auth.clone(),
                 seq,
+                vapid: reg.vapid_public_key.clone(),
             },
         );
         drop(st);
@@ -466,6 +473,48 @@ impl Store {
         if removed {
             self.flush_now();
         }
+    }
+
+    /// The VAPID key recorded for the account's device at `endpoint`, if
+    /// any.
+    pub fn endpoint_vapid(&self, account: AccountId, endpoint: &str) -> Option<String> {
+        let st = self.state.lock().expect("store lock");
+        st.devices
+            .values()
+            .find(|d| d.account == account && d.endpoint == endpoint)
+            .and_then(|d| d.vapid.clone())
+    }
+
+    /// Binds every device with no recorded VAPID key to `current`: records
+    /// from before keys rotated were all made under the one key there was.
+    /// Run before rotating, so they stay with the old key.
+    pub fn pin_vapid(&self, current: &str) {
+        let changed = {
+            let mut st = self.state.lock().expect("store lock");
+            let mut changed = false;
+            for d in st.devices.values_mut().filter(|d| d.vapid.is_none()) {
+                d.vapid = Some(current.to_owned());
+                changed = true;
+            }
+            changed
+        };
+        if changed {
+            self.flush_now();
+        }
+    }
+
+    /// Removes devices for which `keep` is false; returns how many.
+    pub fn retain_devices(&self, keep: impl Fn(&Device) -> bool) -> usize {
+        let removed = {
+            let mut st = self.state.lock().expect("store lock");
+            let before = st.devices.len();
+            st.devices.retain(|_, d| keep(d));
+            before - st.devices.len()
+        };
+        if removed > 0 {
+            self.flush_now();
+        }
+        removed
     }
 
     /// All devices, for the wake-up scheduler.
@@ -587,6 +636,7 @@ mod tests {
                 p256dh: "p".into(),
                 auth: "a".into(),
             },
+            vapid_public_key: None,
         }
     }
 
@@ -662,6 +712,7 @@ mod tests {
             p256dh: "pk".into(),
             auth: "au".into(),
             seq: SeqWindow::default(),
+            vapid: None,
         };
         let dbg = format!("{d:?}");
         assert!(!dbg.contains("secret"));

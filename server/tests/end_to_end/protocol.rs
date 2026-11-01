@@ -198,6 +198,7 @@ async fn wake_round_delivers_encrypted_fixed_pings_and_drops_gone_devices() {
             p256dh: keys["p256dh"].as_str().unwrap().into(),
             auth: keys["auth"].as_str().unwrap().into(),
         },
+        vapid_public_key: None,
     };
     h.state.store.register_device(account, &reg, 10).unwrap();
 
@@ -381,6 +382,7 @@ async fn gateway_429_retry_after_pauses_the_device() {
             p256dh: keys["p256dh"].as_str().unwrap().into(),
             auth: keys["auth"].as_str().unwrap().into(),
         },
+        vapid_public_key: None,
     };
     h.state.store.register_device(account, &reg, 10).unwrap();
 

@@ -257,7 +257,7 @@ async fn info(State(state): State<Arc<AppState>>) -> Response {
             wake_interval_secs: crate::push::WAKE_INTERVAL.as_secs() as u32,
             long_poll_wait_secs: [25, 30],
             finality_depth: FINALITY_DEPTH,
-            vapid_public_key: state.vapid.public_b64.clone(),
+            vapid_public_key: state.vapid.current().public_b64.clone(),
             ohttp_key_config_sha256: state.ohttp_keys_sha256.clone(),
             attestation: None,
         },
@@ -270,10 +270,29 @@ async fn register_device(
     body: Bytes,
 ) -> Result<Response, Problem> {
     let account = authenticate(&state, &headers)?;
-    let reg: DeviceRegistration = parse(&body)?;
+    let mut reg: DeviceRegistration = parse(&body)?;
     // Registration names no device, so it uses the account's window
     // (spec §3.4).
     state.store.accept_account_seq(account, reg.seq)?;
+    // The key the subscription is bound to (spec §4.1): named; or, when
+    // the same endpoint is registered again, the key it already had (a
+    // subscription's key never changes); or the current one.
+    let vapid = match reg.vapid_public_key.take() {
+        None => state
+            .store
+            .endpoint_vapid(account, &reg.endpoint)
+            .filter(|k| state.vapid.get(k).is_some())
+            .unwrap_or_else(|| state.vapid.current().public_b64.clone()),
+        Some(k) if state.vapid.get(&k).is_some() => k,
+        Some(_) => {
+            return Err(Problem::new(
+                StatusCode::BAD_REQUEST,
+                "unknown-vapid-key",
+                "this server doesn't hold that VAPID key; read info again",
+            ));
+        }
+    };
+    reg.vapid_public_key = Some(vapid);
     reg.validate()
         .map_err(|_| Problem::bad_request("invalid push subscription"))?;
     let push = &state.config.push;

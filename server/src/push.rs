@@ -250,10 +250,12 @@ fn build_request(
     let body = crate::webpush::encrypt(plaintext, &ua_public, &auth).ok()?;
     let expires =
         SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_secs() + VAPID_VALIDITY.as_secs();
-    let authorization =
-        state
-            .vapid
-            .authorization(&endpoint, expires, &state.config.vapid_contact)?;
+    // The key this device's subscription is bound to (spec §5.3).
+    let vapid = match device.vapid.as_deref() {
+        Some(k) => state.vapid.get(k)?,
+        None => state.vapid.current(),
+    };
+    let authorization = vapid.authorization(&endpoint, expires, &state.config.vapid_contact)?;
     let mut req = http::Request::post(endpoint);
     req = match kind {
         Kind::Wake => req

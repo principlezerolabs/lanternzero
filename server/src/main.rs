@@ -1,6 +1,8 @@
 //! `lz-server <config.toml>` runs the server.
 //! `lz-server <config.toml> new-account` creates an account and prints its
 //! connection URL once (self-hosting; spec §2.3).
+//! `lz-server <config.toml> rotate-vapid [--drop-old]` replaces the VAPID
+//! key, used from the next start (spec §5.3).
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -18,11 +20,14 @@ async fn main() -> ExitCode {
         .init();
 
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let (config_path, command) = match args.as_slice() {
-        [c] => (PathBuf::from(c), None),
-        [c, cmd] => (PathBuf::from(c), Some(cmd.as_str())),
+    let (config_path, command, flag) = match args.as_slice() {
+        [c] => (PathBuf::from(c), None, None),
+        [c, cmd] => (PathBuf::from(c), Some(cmd.as_str()), None),
+        [c, cmd, flag] => (PathBuf::from(c), Some(cmd.as_str()), Some(flag.as_str())),
         _ => {
-            tracing::error!("usage: lz-server <config.toml> [new-account]");
+            tracing::error!(
+                "usage: lz-server <config.toml> [new-account | rotate-vapid [--drop-old]]"
+            );
             return ExitCode::FAILURE;
         }
     };
@@ -34,11 +39,13 @@ async fn main() -> ExitCode {
         }
     };
 
-    match command {
-        None => serve(config).await,
-        Some("new-account") => new_account(&config),
-        Some(other) => {
-            tracing::error!(command = other, "unknown command");
+    match (command, flag) {
+        (None, _) => serve(config).await,
+        (Some("new-account"), None) => new_account(&config),
+        (Some("rotate-vapid"), None) => rotate_vapid(&config, false),
+        (Some("rotate-vapid"), Some("--drop-old")) => rotate_vapid(&config, true),
+        (Some(other), _) => {
+            tracing::error!(command = other, "unknown command or option");
             ExitCode::FAILURE
         }
     }
@@ -121,6 +128,27 @@ async fn shutdown_signal() {
         () = term => {}
     }
     tracing::info!("shutting down");
+}
+
+/// Retires the VAPID key (spec §5.3). Devices keep the key they were
+/// registered under; wallets move to the new one when `info` shows it.
+/// `--drop-old` is for a suspected leak: devices bound to old keys are
+/// dropped at the next start and register again.
+fn rotate_vapid(config: &Config, drop_old: bool) -> ExitCode {
+    match lz_server::rotate_vapid(&config.data_dir, drop_old) {
+        Ok(public) => {
+            tracing::info!(
+                vapid_public_key = %public,
+                drop_old,
+                "new VAPID key; restart the server to use it"
+            );
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "VAPID rotation failed");
+            ExitCode::FAILURE
+        }
+    }
 }
 
 /// Generates a token on this machine, stores only its hash, and prints the

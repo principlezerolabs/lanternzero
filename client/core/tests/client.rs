@@ -675,3 +675,53 @@ fn deleting_the_account_clears_the_client() {
     assert!(c.state().last_seq.is_some(), "seq keeps rising");
     assert_eq!(c.wake(NOW, None).unwrap_err(), Error::NotRegistered);
 }
+
+#[test]
+fn registration_names_the_vapid_key_from_info() {
+    let gw = Gateway::new(1);
+    // Before any `info`: no key named, so the server uses its current one.
+    let mut c = client(&gw, ClientState::default());
+    let seen = gw.receive(
+        c.register(NOW, "https://push.example/wp/x", c_keys())
+            .unwrap()
+            .request(),
+    );
+    assert!(seen.body.get("vapid_public_key").is_none());
+
+    let mut c = client(
+        &gw,
+        ClientState {
+            vapid_public_key: Some("K1".into()),
+            ..ClientState::default()
+        },
+    );
+    let p = c
+        .register(NOW, "https://push.example/wp/x", c_keys())
+        .unwrap();
+    let seen = gw.receive(p.request());
+    assert_eq!(seen.body["vapid_public_key"], "K1");
+    let reply = seen.answer(400, &problem("unknown-vapid-key", 400), None);
+    assert_eq!(
+        c.finish_register(p, ok(&reply)),
+        Err(Error::UnknownVapidKey)
+    );
+}
+
+#[test]
+fn deleting_an_old_device_record_keeps_the_current_one() {
+    let gw = Gateway::new(1);
+    let mut c = registered(&gw);
+    assert_eq!(
+        c.unregister_device(NOW, "../admin").unwrap_err(),
+        Error::NotRegistered
+    );
+    let p = c.unregister_device(NOW, "dev-old").unwrap();
+    let seen = gw.receive(p.request());
+    assert_eq!(
+        (seen.method.as_str(), seen.path.as_str()),
+        ("DELETE", "/base/v0/devices/dev-old")
+    );
+    let reply = seen.answer(204, &Value::Null, None);
+    c.finish_unregister(p, ok(&reply)).unwrap();
+    assert_eq!(c.state().device_id.as_deref(), Some("dev-1"));
+}

@@ -38,7 +38,8 @@ pub struct AppState {
     pub ohttp_keys: Vec<u8>,
     /// Hex SHA-256 of `ohttp_keys`, published in `info` (spec §3.2).
     pub ohttp_keys_sha256: String,
-    pub vapid: webpush::Vapid,
+    /// The current VAPID key and retired ones still bound to devices.
+    pub vapid: keys::VapidKeys,
     pub http: reqwest::Client,
     /// Best known tip and block announcements, fed by [`chain::run`].
     pub chain: Arc<chain::Chain>,
@@ -83,7 +84,6 @@ impl AppState {
         let ohttp_keys = ohttp::KeyConfig::encode_list(&[&key_config])?;
         let ohttp_keys_sha256 = sha256_hex(&ohttp_keys);
         let ohttp = ohttp::Server::new(key_config)?;
-        let vapid = keys::vapid_key(&config.data_dir)?;
         let allow_private = config.push.allow_private_targets;
         let http = reqwest::Client::builder()
             .dns_resolver(ssrf::SafeResolver { allow_private })
@@ -94,6 +94,7 @@ impl AppState {
             .timeout(std::time::Duration::from_secs(15))
             .build()?;
         let store = store::Store::open(&config.data_dir)?;
+        let vapid = load_vapid(&config.data_dir, &store)?;
         let scanner = scanner::Scanner::new(keys::event_id_secret(&config.data_dir)?);
         let chain_source = match &config.chain {
             Some(c) => Some(chain::Lightwalletd::new(&c.lightwalletd)?),
@@ -118,6 +119,38 @@ impl AppState {
             payment_push_limiter: limits::RateLimiter::new(scanner::PAYMENT_PUSHES_PER_MINUTE),
         }))
     }
+}
+
+/// Loads the VAPID keys and reconciles them with the devices (spec §5.3):
+/// records from before rotation are bound to the current key, devices bound
+/// to a dropped key are removed (they can't be signed for), and retired
+/// keys no device uses any more are deleted.
+fn load_vapid(dir: &std::path::Path, store: &store::Store) -> Result<keys::VapidKeys, StartError> {
+    let vapid = keys::vapid_keys(dir)?;
+    store.pin_vapid(&vapid.current().public_b64);
+    let dropped =
+        store.retain_devices(|d| d.vapid.as_deref().is_some_and(|k| vapid.get(k).is_some()));
+    if dropped > 0 {
+        tracing::warn!(dropped, "removed devices bound to a dropped VAPID key");
+    }
+    let devices = store.devices();
+    let pruned = keys::prune_vapid(dir, &|k| {
+        devices.iter().any(|(_, d)| d.vapid.as_deref() == Some(k))
+    })?;
+    if pruned > 0 {
+        tracing::info!(pruned, "deleted retired VAPID keys no device uses");
+        return Ok(keys::vapid_keys(dir)?);
+    }
+    Ok(vapid)
+}
+
+/// `lz-server <config> rotate-vapid [--drop-old]`: binds existing devices
+/// to the current key, then retires it (spec §5.3). Restart the server
+/// afterwards. Returns the new public key.
+pub fn rotate_vapid(dir: &std::path::Path, drop_old: bool) -> Result<String, StartError> {
+    let store = store::Store::open(dir)?;
+    store.pin_vapid(&keys::vapid_key(dir)?.public_b64);
+    Ok(keys::rotate_vapid(dir, drop_old)?)
 }
 
 /// Crates whose debug and trace logs include hosts, URLs, or headers.

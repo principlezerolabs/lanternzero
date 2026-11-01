@@ -205,6 +205,18 @@ impl Harness {
         .await
     }
 
+    /// The same server started again on its data directory, as after a
+    /// restart (keys, accounts, and devices reload from disk).
+    pub(crate) fn restart(&self) -> Self {
+        let state = AppState::new(self.state.config.clone()).unwrap();
+        Self {
+            app: gateway::router(state.clone()),
+            state,
+            token: self.token.clone(),
+            seq: self.seq,
+        }
+    }
+
     /// Clone for a concurrent OHTTP round trip without touching `seq`.
     pub(crate) fn fork(&self) -> Self {
         Self {

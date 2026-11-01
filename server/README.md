@@ -14,7 +14,7 @@ scanning also against real Zebra and Zaino on regtest
 | --- | --- | --- |
 | OHTTP gateway | §3.1–3.3 | Key configuration (RFC 9540), relay purpose opt-in, fixed 4096-byte inner requests and responses, zero-padding checks |
 | `POST /v0/info` | §4.7 | |
-| `POST /v0/devices`, `DELETE /v0/devices/{id}` | §4.1 | Shape checks, SSRF rules, per-account device cap |
+| `POST /v0/devices`, `DELETE /v0/devices/{id}` | §4.1 | Shape checks, SSRF rules, per-account device cap; records the VAPID key the subscription is bound to (`vapid_public_key`, or the current key), refusing keys it doesn't hold |
 | `POST /v0/wake` | §4.2 | Leases of 1–4 UIVKs (ZIP 316 Revision 0 or 2, either case), renewed on each wake, backfilled from `from_height` (at most 7 days of blocks); `lease: null` drops the lease and its events at once; acks; hints; events paged to the fixed size |
 | `POST /v0/token/rotate`, `DELETE /v0/account` | §4.6 | Rotation keeps the old token until the new one is first used, or for 24 h; retries succeed; reused hashes get `400`. Deletion drops token hashes, devices, replay window, lease, events, and hints at once. Both rewrite `accounts.txt` atomically under a lock shared with `new-account`, keeping comments and accounts added meanwhile |
 | `POST /v0/events` | §4.3 | Long-poll held until the server-wide release (new block, match, or reorg) plus 0–2 s jitter, or 25–30 s; never early, even with events pending; `wait: 0` for `next` pages |
@@ -24,7 +24,7 @@ scanning also against real Zebra and Zaino on regtest
 | Replay protection | §3.4 | `Date` within 60 s; `seq` windows per device, or per account for registration, rotation, and deletion; `409 stale-seq` with `min_seq` |
 | Rate limits | §3.5 | Per account and per device, per minute; `429` with `Retry-After`, delivered inside OHTTP |
 | Chain follower | §6.1 | Follows Zaino or lightwalletd with `GetLatestBlock` and `GetBlockRange` only; checks the network (by `chain_name` and Sapling's activation height, since Zaino reports regtest as `"test"`); rolls back reorgs up to 100 blocks and starts over at the tip on deeper ones; keeps `tip` current and announces each block to the rest of the server |
-| Wake-up scheduler | §5.1, §5.3 | Every 30 min on the half hour, spread over 5 min; RFC 8291 encryption, VAPID, `TTL`/`Urgency`/`Topic`; drops devices on `404`/`410`; honors a gateway's `429` `Retry-After` (capped at 24 h) |
+| Wake-up scheduler | §5.1, §5.3 | Every 30 min on the half hour, spread over 5 min; RFC 8291 encryption, VAPID signed with the key each device's subscription is bound to, `TTL`/`Urgency`/`Topic`; drops devices on `404`/`410`; honors a gateway's `429` `Retry-After` (capped at 24 h) |
 
 ## Not yet
 
@@ -36,9 +36,7 @@ scanning also against real Zebra and Zaino on regtest
   decoded Sapling and Orchard key types don't zero themselves; deployments
   must disable swap and core dumps (spec §6.2).
 - **Webhooks** (§4.5).
-- **Key rotation.** Neither the OHTTP key configuration nor the VAPID key
-  rotates yet. VAPID rotation (spec §5.3) will need a key id per device
-  record, since each subscription is bound to the key it was created with.
+- **OHTTP key rotation.** The OHTTP key configuration doesn't rotate yet.
 - **Live account loading.** `new-account` takes effect after a restart.
 
 ## Run
@@ -51,10 +49,26 @@ cargo run -p lz-server -- server/examples/config.toml
 Put TLS in front of it (a reverse proxy), and point an OHTTP relay at
 `https://<public_host>/.well-known/ohttp-gateway`.
 
+### Rotating the VAPID key
+
+```sh
+lz-server <config.toml> rotate-vapid              # routine
+lz-server <config.toml> rotate-vapid --drop-old   # suspected leak
+```
+
+Then restart the server. Push subscriptions are bound to the key they were
+created with (spec §5.3), so each device record keeps its key, and `info`
+publishes the new one. Wallets notice the change, subscribe again with the
+new key, and delete their old device record; the old key, in
+`data_dir/vapid-retired/`, is deleted at the first start after no device
+uses it. With `--drop-old`, old keys are deleted at once and the devices
+bound to them are dropped at the next start; those wallets register again
+when their next `wake` gets `unknown-device`.
+
 ## Security notes
 
 - **Data directory.** `data_dir` holds the server's own keys (OHTTP seed,
-  VAPID key), token hashes, and device records. The directory is created
+  VAPID keys), token hashes, and device records. The directory is created
   `0700` and its files `0600`. It never holds viewing keys or anything
   derived from them.
 - **Logs.** Nothing logs tokens, request bodies, headers, or push endpoints.

@@ -634,7 +634,7 @@ async fn server_wake_round_reaches_the_device_through_the_gateway() {
     // The wallet subscribes at its gateway with the server's key from
     // `info`, then registers the endpoint with the server.
     let r = h
-        .subscribe("apns", APNS_TOKEN, &server.vapid.public_b64)
+        .subscribe("apns", APNS_TOKEN, &server.vapid.current().public_b64)
         .await;
     let endpoint = serde_json::from_slice::<Value>(&r.bytes().await.unwrap()).unwrap()["endpoint"]
         .as_str()
@@ -656,6 +656,7 @@ async fn server_wake_round_reaches_the_device_through_the_gateway() {
                     )),
                     auth: URL_SAFE_NO_PAD.encode(auth),
                 },
+                vapid_public_key: None,
             },
             10,
         )

@@ -17,7 +17,7 @@ use lz_proto::url::ConnectionUrl;
 use lz_server::config::LimitsConfig;
 use lz_server::gateway::GATEWAY_PATH;
 
-use super::harness::{BASE, HOST, Harness, harness_full, receiver};
+use super::harness::{BASE, HOST, Harness, harness, harness_full, receiver};
 use super::scanning::{eventually, sync_tip};
 use crate::common::fake_lwd;
 use crate::common::wallet::{Wallet, action, block, tx};
@@ -80,7 +80,10 @@ async fn a_wallet_session_through_the_client_core() {
     sizes.push(p.request().body.len());
     let r = relay(&h, p.request()).await;
     let info = c.finish_info(p, reply(&r)).unwrap();
-    assert_eq!(info.info.vapid_public_key, h.state.vapid.public_b64);
+    assert_eq!(
+        info.info.vapid_public_key,
+        h.state.vapid.current().public_b64
+    );
     assert!(!info.vapid_key_changed);
 
     // Register with an endpoint from the vendor's gateway, then remove it.
@@ -133,6 +136,7 @@ async fn a_wallet_session_through_the_client_core() {
                 seq: 1,
                 endpoint,
                 keys: device.push_keys(),
+                vapid_public_key: None,
             },
             10,
         )
@@ -341,4 +345,184 @@ async fn token_rotation_and_account_deletion_through_the_client_core() {
 
     // Invariant 4: account actions look like every other request.
     assert!(sizes.iter().all(|&s| s == sizes[0]), "{sizes:?}");
+}
+
+#[tokio::test]
+async fn vapid_rotation_keeps_devices_on_their_key_until_they_move() {
+    let h = harness(true);
+    let dir = h.state.config.data_dir.clone();
+    let k1 = h.state.vapid.current().public_b64.clone();
+    let account = h
+        .state
+        .store
+        .authenticate(&TokenHash::of_text(&h.token))
+        .unwrap();
+
+    // A device record from before keys rotated, with no key recorded.
+    let (endpoint, pushes) = receiver(StatusCode::CREATED).await;
+    let device = PushReceiver::generate().unwrap();
+    let legacy = h
+        .state
+        .store
+        .register_device(
+            account,
+            &DeviceRegistration {
+                seq: 1,
+                endpoint,
+                keys: device.push_keys(),
+                vapid_public_key: None,
+            },
+            10,
+        )
+        .unwrap();
+    let config = KeyConfig::from_two_relays(&h.key_config().await, &h.key_config().await).unwrap();
+    let mut c = Client::new(
+        connection(&h),
+        Network::Main,
+        Transport::Ohttp(config.clone()),
+        ClientState::default(),
+    )
+    .unwrap();
+    let p = c.info(now_ms()).unwrap();
+    let r = relay(&h, p.request()).await;
+    assert_eq!(
+        c.finish_info(p, reply(&r)).unwrap().info.vapid_public_key,
+        k1
+    );
+
+    // A wallet that never read `info` registers without naming a key: it
+    // gets the current one.
+    let mut unnamed = Client::new(
+        connection(&h),
+        Network::Main,
+        Transport::Ohttp(config.clone()),
+        ClientState {
+            last_seq: c.state().last_seq,
+            ..ClientState::default()
+        },
+    )
+    .unwrap();
+    let pre = "https://push.example-wallet.app/wp/pre";
+    let p = unnamed.register(now_ms(), pre, device.push_keys()).unwrap();
+    let r = relay(&h, p.request()).await;
+    unnamed.finish_register(p, reply(&r)).unwrap();
+
+    // Rotate, then restart.
+    let k2 = lz_server::rotate_vapid(&dir, false).unwrap();
+    assert_ne!(k2, k1);
+    let h = h.restart();
+    assert_eq!(h.state.vapid.current().public_b64, k2);
+    assert_eq!(h.state.vapid.retired().collect::<Vec<_>>(), [k1.as_str()]);
+    let vapid_of = |h: &Harness, id: &str| {
+        h.state
+            .store
+            .devices()
+            .into_iter()
+            .find(|(d, _)| d == id)
+            .and_then(|(_, d)| d.vapid)
+    };
+    assert_eq!(vapid_of(&h, &legacy).as_deref(), Some(k1.as_str()));
+
+    // The old device is still signed for with the key its subscription is
+    // bound to.
+    lz_server::push::wake_round(&h.state, Duration::ZERO).await;
+    eventually(|| !pushes.0.lock().unwrap().is_empty()).await;
+    let (headers, body) = pushes.0.lock().unwrap().pop().unwrap();
+    let auth = headers["authorization"].to_str().unwrap();
+    assert!(auth.ends_with(&format!("k={k1}")), "{auth}");
+    assert_eq!(device.open_ping(&body).unwrap().t, PingType::Wake);
+
+    // Registering that same endpoint again without naming a key keeps the
+    // key it was bound to: a subscription's key never changes.
+    let p = unnamed.register(now_ms(), pre, device.push_keys()).unwrap();
+    let r = relay(&h, p.request()).await;
+    let again = unnamed.finish_register(p, reply(&r)).unwrap();
+    assert_eq!(vapid_of(&h, &again).as_deref(), Some(k1.as_str()));
+    h.state.store.remove_device(&again);
+
+    // The wallet sees the new key and registers a subscription bound to it.
+    let p = c.info(now_ms()).unwrap();
+    let r = relay(&h, p.request()).await;
+    let info = c.finish_info(p, reply(&r)).unwrap();
+    assert!(info.vapid_key_changed);
+    assert_eq!(info.info.vapid_public_key, k2);
+    let p = c
+        .register(
+            now_ms(),
+            "https://push.example-wallet.app/wp/new",
+            device.push_keys(),
+        )
+        .unwrap();
+    let r = relay(&h, p.request()).await;
+    let moved = c.finish_register(p, reply(&r)).unwrap();
+    assert_eq!(vapid_of(&h, &moved).as_deref(), Some(k2.as_str()));
+    // Then it deletes its old device record by id.
+    let p = c.unregister_device(now_ms(), &legacy).unwrap();
+    let r = relay(&h, p.request()).await;
+    c.finish_unregister(p, reply(&r)).unwrap();
+    assert!(vapid_of(&h, &legacy).is_none());
+    assert_eq!(c.state().device_id.as_deref(), Some(moved.as_str()));
+
+    // A wallet that read `info` just before the rotation names the old key,
+    // and gets it; a key the server doesn't hold is refused.
+    let stale_state = |key: &str| ClientState {
+        vapid_public_key: Some(key.to_owned()),
+        last_seq: c.state().last_seq,
+        ..ClientState::default()
+    };
+    let mut late = Client::new(
+        connection(&h),
+        Network::Main,
+        Transport::Ohttp(config.clone()),
+        stale_state(&k1),
+    )
+    .unwrap();
+    let p = late
+        .register(
+            now_ms(),
+            "https://push.example-wallet.app/wp/late",
+            device.push_keys(),
+        )
+        .unwrap();
+    let r = relay(&h, p.request()).await;
+    let late_id = late.finish_register(p, reply(&r)).unwrap();
+    assert_eq!(vapid_of(&h, &late_id).as_deref(), Some(k1.as_str()));
+    let unknown = PushReceiver::generate().unwrap().push_keys().p256dh;
+    let mut lost = Client::new(
+        connection(&h),
+        Network::Main,
+        Transport::Ohttp(config.clone()),
+        stale_state(&unknown),
+    )
+    .unwrap();
+    let p = lost
+        .register(
+            now_ms(),
+            "https://push.example-wallet.app/wp/lost",
+            device.push_keys(),
+        )
+        .unwrap();
+    let r = relay(&h, p.request()).await;
+    assert_eq!(
+        lost.finish_register(p, reply(&r)),
+        Err(Error::UnknownVapidKey)
+    );
+
+    // Once no device is bound to the old key, the next start deletes it.
+    h.state.store.remove_device(&late_id);
+    let h = h.restart();
+    assert_eq!(h.state.vapid.retired().count(), 0);
+    let retired_dir = dir.join(lz_server::keys::VAPID_RETIRED_DIR);
+    assert_eq!(std::fs::read_dir(&retired_dir).unwrap().count(), 0);
+    assert!(h.state.vapid.get(&k1).is_none());
+
+    // After a suspected leak, the old key goes at once, with its devices.
+    let k3 = lz_server::rotate_vapid(&dir, true).unwrap();
+    let h = h.restart();
+    assert_eq!(h.state.vapid.current().public_b64, k3);
+    assert_eq!(h.state.vapid.retired().count(), 0);
+    assert!(
+        h.state.store.devices().is_empty(),
+        "devices bound to k2 dropped"
+    );
 }

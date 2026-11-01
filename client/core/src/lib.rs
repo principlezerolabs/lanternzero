@@ -86,6 +86,11 @@ pub enum Error {
     SpendAlertsUnavailable,
     #[error("the account has the maximum number of devices")]
     TooManyDevices,
+    /// The server no longer holds the VAPID key this registration named:
+    /// read `info` again, subscribe at the gateway with the key it reports,
+    /// and register that subscription (spec §4.1).
+    #[error("the server doesn't hold this VAPID key; read info again")]
+    UnknownVapidKey,
     /// The server is on a different network: refuse to connect (§4.7).
     #[error("server is on a different network")]
     WrongNetwork,
