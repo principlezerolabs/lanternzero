@@ -17,6 +17,8 @@ scanning also against real Zebra and Zaino on regtest
 | `POST /v0/devices`, `DELETE /v0/devices/{id}` | §4.1 | Shape checks, SSRF rules, per-account device cap; records the VAPID key the subscription is bound to (`vapid_public_key`, or the current key), refusing keys it doesn't hold |
 | `POST /v0/wake` | §4.2 | Leases of 1–4 UIVKs (ZIP 316 Revision 0 or 2, either case), renewed on each wake, backfilled from `from_height` (at most 7 days of blocks); `lease: null` drops the lease and its events at once; acks; hints; events paged to the fixed size |
 | `POST /v0/token/rotate`, `DELETE /v0/account` | §4.6 | Rotation keeps the old token until the new one is first used, or for 24 h; retries succeed; reused hashes get `400`. Deletion drops token hashes, devices, replay window, lease, events, and hints at once. Both rewrite `accounts.txt` atomically under a lock shared with `new-account`, keeping comments and accounts added meanwhile |
+| Scanning time and idle accounts | §4.2, §4.6, §4.7 | `[accounts]`: `scanning = "entitled"` limits leases to accounts with scanning time and clamps them to its end, answering `403 scanning-not-included` (fixed size) otherwise; `idle_account_days` deletes accounts idle longer, keeping only the UTC day of each account's last request, skipping days the server was down, and is published in `info` |
+| Issuer interface | §2.3, §4.6 | [`ISSUER.md`](ISSUER.md): HTTP over `data_dir/issuer.sock` (0600), never TCP or OHTTP. `create` (live at once), `resolve`, `scan_until`, `add_scan_time` (idempotent by key), `deletions` (30 days), `delete` |
 | `POST /v0/events` | §4.3 | Long-poll held until the server-wide release (new block, match, or reorg) plus 0–2 s jitter, or 25–30 s; never early, even with events pending; `wait: 0` for `next` pages |
 | Scanner | §4.4, §6.1 | Trial decryption of Sapling outputs and Orchard and Ironwood actions in compact blocks, for every active lease; deterministic event ids; `mined` → `reorged` → re-mined; confirmations up to the finality depth; events deleted on ack or after 7 days; expired leases swept every minute; catches up after falling behind |
 | Mempool | §4.3, §6.1 | `GetMempoolStream`, reopened after each block; full transactions (v5 and v6) cut to `CompactTx` and trial-decrypted like blocks; matches are `mempool` events that become `mined` with the same id; a new lease is checked against the pending mempool, kept in compact form up to 64 MiB; an unknown branch id is logged, not fatal |
@@ -42,7 +44,12 @@ scanning also against real Zebra and Zaino on regtest
   yet check that the onion service or OHTTP gateway answers from outside,
   or the clock beyond what the tip's age shows; `lz-server init` doesn't
   exist yet.
-- **Live account loading.** `new-account` takes effect after a restart.
+- **Live account loading for `new-account`.** Accounts the CLI adds take
+  effect after a restart; accounts made through the issuer socket are live
+  at once.
+- **Issuer types crate.** The issuer socket's request and answer types live
+  in the server; a small shared crate can follow when an issuer wants to
+  link against them.
 
 ## Run
 
@@ -73,7 +80,9 @@ when their next `wake` gets `unknown-device`.
 ## Security notes
 
 - **Data directory.** `data_dir` holds the server's own keys (OHTTP seed,
-  VAPID keys), token hashes, and device records. The directory is created
+  VAPID keys), token hashes, device records, and, when `[accounts]` uses
+  them, scanning end times, last-active days, and the issuer socket
+  ([`ISSUER.md`](ISSUER.md)). The directory is created
   `0700` and its files `0600`. It never holds viewing keys or anything
   derived from them.
 - **Logs.** Nothing logs tokens, request bodies, headers, or push endpoints.

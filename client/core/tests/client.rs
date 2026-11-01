@@ -376,6 +376,15 @@ fn unknown_device_rate_limits_and_lease_refusals() {
         Err(Error::ScanningUnavailable)
     );
 
+    let p = c.wake(NOW, Some(lease(vec![&uivk()], false))).unwrap();
+    let reply = gw
+        .receive(p.request())
+        .answer(403, &problem("scanning-not-included", 403), None);
+    assert_eq!(
+        c.finish_wake(p, ok(&reply)),
+        Err(Error::ScanningNotIncluded)
+    );
+
     // The wallet must not send a full viewing key without spend alerts.
     let fvk = format!("uview1{}", "q".repeat(300));
     assert!(matches!(
@@ -449,6 +458,7 @@ fn info_body(gw: &Gateway, network: &str, vapid: &str) -> Value {
         "finality_depth": 10,
         "vapid_public_key": vapid,
         "ohttp_key_config_sha256": gw.key_config().sha256_hex(),
+        "idle_account_days": null,
         "attestation": null,
     })
 }

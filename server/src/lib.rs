@@ -9,6 +9,8 @@
 //! - [`push`]: the 30-minute wake-up scheduler.
 //! - [`chain`]: the chain follower, which keeps `tip` current and announces
 //!   blocks.
+//! - [`issuer`]: the local issuer interface on a Unix socket in `data_dir`
+//!   (`server/ISSUER.md`). Never reachable through the gateway.
 //!
 //! Nothing in this crate logs request bodies, headers, tokens, or push
 //! endpoints (invariants 1 and 6).
@@ -19,6 +21,7 @@ pub mod config;
 pub mod doctor;
 pub mod gateway;
 pub mod hardening;
+pub mod issuer;
 pub mod keys;
 pub mod limits;
 pub mod mempool;
@@ -96,6 +99,10 @@ impl AppState {
             .timeout(std::time::Duration::from_secs(15))
             .build()?;
         let store = store::Store::open(&config.data_dir)?;
+        store.configure(
+            config.accounts.idle_account_days > 0,
+            config.accounts.issuer_socket,
+        );
         let vapid = load_vapid(&config.data_dir, &store)?;
         let scanner = scanner::Scanner::new(keys::event_id_secret(&config.data_dir)?);
         let chain_source = match &config.chain {
@@ -120,6 +127,52 @@ impl AppState {
             push_backoff: limits::PushBackoff::default(),
             payment_push_limiter: limits::RateLimiter::new(scanner::PAYMENT_PUSHES_PER_MINUTE),
         }))
+    }
+}
+
+impl AppState {
+    /// Deletes an account as `DELETE /v0/account` does (spec §4.6): its
+    /// token hashes, devices, and replay window on disk, then its lease,
+    /// events, and hints in memory. Used by the API, the idle sweep, and
+    /// the issuer.
+    pub fn delete_account(&self, account: store::AccountId) -> std::io::Result<()> {
+        self.store.delete_account(account)?;
+        self.scanner.end_lease(account);
+        Ok(())
+    }
+
+    /// One pass of account housekeeping: deletes idle accounts (spec §4.6)
+    /// and forgets expired issuer records. Returns how many it deleted.
+    pub fn sweep_accounts(&self, now_unix: u64) -> usize {
+        let idle = self
+            .store
+            .sweep(self.config.accounts.idle_account_days, now_unix);
+        let mut deleted = 0;
+        for account in idle {
+            match self.delete_account(account) {
+                Ok(()) => deleted += 1,
+                Err(e) => tracing::error!(error = %e, "cannot delete an idle account"),
+            }
+        }
+        deleted
+    }
+}
+
+/// Runs [`AppState::sweep_accounts`] at start and then every hour. The
+/// store counts whole UTC days, so sweeping more often than daily deletes
+/// nothing sooner.
+pub async fn account_sweep_loop(state: Arc<AppState>) {
+    let mut tick = tokio::time::interval(std::time::Duration::from_secs(3600));
+    loop {
+        tick.tick().await;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let deleted = state.sweep_accounts(now);
+        if deleted > 0 {
+            tracing::info!(deleted, "deleted idle accounts");
+        }
     }
 }
 

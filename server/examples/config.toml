@@ -23,6 +23,14 @@ max_devices_per_account = 10
 # [hardening]
 # allow_swap = false
 
+# Who may scan, idle expiry, and the issuer socket (spec §4.6;
+# server/ISSUER.md). These defaults change nothing: every account may scan,
+# none expire, no socket.
+[accounts]
+scanning = "all"          # or "entitled": only accounts with scanning time left
+idle_account_days = 0     # 0 = never; otherwise at least 8
+issuer_socket = false     # true: serve <data_dir>/issuer.sock (mode 0600)
+
 [limits]
 # Requests per minute. A foreground wallet long-polls about every 25 s.
 account_per_minute = 120

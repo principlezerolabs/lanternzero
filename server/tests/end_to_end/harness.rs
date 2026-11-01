@@ -13,7 +13,7 @@ use bhttp::{Message, Mode};
 use lz_proto::lease::Network;
 use lz_proto::padding::{REQUEST_SIZE, pad_bhttp};
 use lz_proto::token::AccountToken;
-use lz_server::config::{Config, LimitsConfig, PushConfig};
+use lz_server::config::{AccountsConfig, Config, LimitsConfig, PushConfig};
 use lz_server::store::Store;
 use lz_server::{AppState, gateway};
 use serde_json::{Value, json};
@@ -51,6 +51,20 @@ pub(crate) fn harness_full(
     limits: LimitsConfig,
     lightwalletd: Option<String>,
 ) -> Harness {
+    harness_accounts(
+        allow_private_targets,
+        limits,
+        lightwalletd,
+        AccountsConfig::default(),
+    )
+}
+
+pub(crate) fn harness_accounts(
+    allow_private_targets: bool,
+    limits: LimitsConfig,
+    lightwalletd: Option<String>,
+    accounts: AccountsConfig,
+) -> Harness {
     let dir = temp_dir();
     let token = AccountToken::generate().unwrap();
     Store::add_account_to_file(&dir, &token.hash()).unwrap();
@@ -72,6 +86,7 @@ pub(crate) fn harness_full(
         },
         limits,
         hardening: Default::default(),
+        accounts,
     };
     let state = AppState::new(config).unwrap();
     let app = gateway::router(state.clone());

@@ -592,6 +592,7 @@ impl Client {
             },
             (401, _) => Error::Unauthorized,
             (501, "scanning-unavailable") => Error::ScanningUnavailable,
+            (403, "scanning-not-included") => Error::ScanningNotIncluded,
             (501, "spend-alerts-unavailable") => Error::SpendAlertsUnavailable,
             (status, _) => Error::Server {
                 status,

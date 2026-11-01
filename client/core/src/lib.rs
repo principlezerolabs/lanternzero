@@ -82,6 +82,11 @@ pub enum Error {
     Unauthorized,
     #[error("this server does not offer scanning")]
     ScanningUnavailable,
+    /// The server scans only for accounts with scanning time, and this one
+    /// has none left (spec §4.2, §4.6). Send `lease: None` from now on and
+    /// tell the user that scanning isn't part of their account.
+    #[error("scanning is not part of this account")]
+    ScanningNotIncluded,
     #[error("this server does not offer spend alerts")]
     SpendAlertsUnavailable,
     #[error("the account has the maximum number of devices")]

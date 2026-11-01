@@ -23,6 +23,7 @@ use serde::de::DeserializeOwned;
 use zeroize::Zeroize;
 
 use crate::AppState;
+use crate::config::ScanningPolicy;
 use crate::scanner::{FINALITY_DEPTH, Page};
 use crate::ssrf;
 use crate::store::{AccountId, RotateError, StoreError};
@@ -84,7 +85,14 @@ impl Problem {
             )
         }
     }
-    fn bad_request(title: &'static str) -> Self {
+    pub(crate) fn internal() -> Self {
+        Self::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal",
+            "internal error",
+        )
+    }
+    pub(crate) fn bad_request(title: &'static str) -> Self {
         Self::new(StatusCode::BAD_REQUEST, "bad-request", title)
     }
     fn unauthorized() -> Self {
@@ -259,6 +267,7 @@ async fn info(State(state): State<Arc<AppState>>) -> Response {
             finality_depth: FINALITY_DEPTH,
             vapid_public_key: state.vapid.current().public_b64.clone(),
             ohttp_key_config_sha256: state.ohttp_keys_sha256.clone(),
+            idle_account_days: Some(state.config.accounts.idle_account_days).filter(|&d| d > 0),
             attestation: None,
         },
     )
@@ -357,9 +366,25 @@ async fn wake(
                     "this server does not offer spend alerts",
                 ));
             }
+            // Scanning time (spec §4.2, §4.6).
+            let secs_left = match state.config.accounts.scanning {
+                ScanningPolicy::All => None,
+                ScanningPolicy::Entitled => {
+                    let left = state.store.scan_secs_left(account, unix_secs(now));
+                    if left == 0 {
+                        state.scanner.end_lease(account);
+                        return Err(Problem::new(
+                            StatusCode::FORBIDDEN,
+                            "scanning-not-included",
+                            "scanning is not part of this account",
+                        ));
+                    }
+                    Some(left)
+                }
+            };
             let keys = ScanKeys::decode(&lease.keys, state.config.network)
                 .map_err(|_| Problem::bad_request("invalid lease"))?;
-            let duration = Duration::from_secs(clamp_duration(lease.duration_secs, None));
+            let duration = Duration::from_secs(clamp_duration(lease.duration_secs, secs_left));
             let tip = state.chain.tip();
             if let Some(bf) = state
                 .scanner
@@ -466,21 +491,14 @@ async fn rotate_token(
     state.store.accept_account_seq(account, req.seq)?;
     let new = TokenHash::from_hex(&req.new_token_hash)
         .ok_or_else(|| Problem::bad_request("invalid new_token_hash"))?;
-    let now = SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
+    let now = unix_secs(SystemTime::now());
     match state.store.rotate_token(account, &presented, &new, now) {
         Ok(()) => Ok(StatusCode::NO_CONTENT.into_response()),
         // Says nothing about whose token it is.
         Err(RotateError::InUse) => Err(Problem::bad_request("new_token_hash cannot be used")),
         Err(RotateError::Io(e)) => {
             tracing::error!(error = %e, "cannot rotate a token");
-            Err(Problem::new(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "internal",
-                "internal error",
-            ))
+            Err(Problem::internal())
         }
     }
 }
@@ -495,16 +513,17 @@ async fn delete_account(
     let account = authenticate(&state, &headers)?;
     let SeqOnly { seq } = parse(&body)?;
     state.store.accept_account_seq(account, seq)?;
-    if let Err(e) = state.store.delete_account(account) {
+    if let Err(e) = state.delete_account(account) {
         tracing::error!(error = %e, "cannot delete an account");
-        return Err(Problem::new(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "internal",
-            "internal error",
-        ));
+        return Err(Problem::internal());
     }
-    state.scanner.end_lease(account);
     Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+pub(crate) fn unix_secs(t: SystemTime) -> u64 {
+    t.duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
 }
 
 fn json_len<T: Serialize>(value: &T) -> usize {

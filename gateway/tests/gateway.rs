@@ -629,6 +629,7 @@ async fn server_wake_round_reaches_the_device_through_the_gateway() {
         },
         limits: Default::default(),
         hardening: Default::default(),
+        accounts: Default::default(),
     })
     .unwrap();
 

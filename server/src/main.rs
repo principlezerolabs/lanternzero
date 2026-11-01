@@ -106,6 +106,31 @@ async fn serve(config: Config) -> ExitCode {
         _ => tracing::warn!("no [chain] configured: tip stays 0 and nothing is scanned"),
     }
     tokio::spawn(scanner::sweep_loop(state.clone()));
+    tokio::spawn(lz_server::account_sweep_loop(state.clone()));
+    if state.config.accounts.issuer_socket {
+        #[cfg(unix)]
+        {
+            let listener = match lz_server::issuer::bind(&state.config.data_dir) {
+                Ok(l) => l,
+                Err(e) => {
+                    tracing::error!(error = %e, "cannot serve the issuer socket");
+                    return ExitCode::FAILURE;
+                }
+            };
+            let app = lz_server::issuer::router(state.clone());
+            tokio::spawn(async move {
+                if let Err(e) = axum::serve(listener, app).await {
+                    tracing::error!(error = %e, "issuer socket stopped");
+                }
+            });
+            tracing::info!("serving the issuer interface on data_dir/issuer.sock");
+        }
+        #[cfg(not(unix))]
+        {
+            tracing::error!("accounts.issuer_socket needs a Unix system");
+            return ExitCode::FAILURE;
+        }
+    }
     let flusher = state.clone();
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(Duration::from_secs(10));

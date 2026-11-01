@@ -238,6 +238,10 @@ pub struct Info {
     pub finality_depth: u32,
     pub vapid_public_key: String,
     pub ohttp_key_config_sha256: String,
+    /// Days without an authenticated request after which the server may
+    /// delete an account (spec §4.6); `None` if it never does.
+    #[serde(default)]
+    pub idle_account_days: Option<u32>,
     /// Reserved for enclave attestation; always `null` in v0.
     pub attestation: Option<serde_json::Value>,
 }

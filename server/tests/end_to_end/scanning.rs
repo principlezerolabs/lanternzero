@@ -6,12 +6,12 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use axum::http::StatusCode;
 use lz_proto::api::{DeviceRegistration, PushKeys};
 use lz_proto::padding::RESPONSE_SIZE;
-use lz_server::config::LimitsConfig;
+use lz_server::config::{AccountsConfig, LimitsConfig, ScanningPolicy};
 use lz_server::push;
 use serde_json::{Value, json};
 
 use super::harness::{
-    Captured, HOST, Harness, Reply, global_logs, harness_full, problem_slug, receiver, ua_keys,
+    Captured, HOST, Harness, Reply, global_logs, harness_accounts, problem_slug, receiver, ua_keys,
 };
 use crate::common::fake_lwd;
 use crate::common::wallet::{self, Wallet, action, block, sapling_output, tx};
@@ -28,10 +28,14 @@ struct Scanning {
 }
 
 async fn scanning(height: u64) -> Scanning {
+    scanning_with(height, AccountsConfig::default()).await
+}
+
+async fn scanning_with(height: u64, accounts: AccountsConfig) -> Scanning {
     let chain = fake_lwd::genesis();
     chain.lock().unwrap().build(1, height, 1);
     let url = fake_lwd::serve(chain.clone()).await;
-    let h = harness_full(true, LimitsConfig::default(), Some(url));
+    let h = harness_accounts(true, LimitsConfig::default(), Some(url), accounts);
     sync_tip(&h).await;
     let (endpoint, pushes) = receiver(StatusCode::CREATED).await;
     let (push_keys, keys) = ua_keys();
@@ -545,4 +549,55 @@ async fn an_unknown_branch_id_does_not_stop_mempool_scanning() {
     s.wake(&[], lease_json(&alice, 10, "instant")).await;
     tokio::spawn(lz_server::mempool::run(s.h.state.clone()));
     eventually(|| s.page_len() == 1).await;
+}
+
+/// Spec §4.2, §4.6: with `scanning = "entitled"`, a lease needs scanning
+/// time. Without it the answer is a fixed-size `403`, and the keys and any
+/// lease are dropped; with it the lease ends at the scanning end time, even
+/// when that is under 24 h away.
+#[tokio::test]
+async fn leases_need_scanning_time_and_end_with_it() {
+    let alice = Wallet::new(1);
+    let mut s = scanning_with(
+        100,
+        AccountsConfig {
+            scanning: ScanningPolicy::Entitled,
+            issuer_socket: true,
+            ..AccountsConfig::default()
+        },
+    )
+    .await;
+
+    let r = s.wake(&[], lease_json(&alice, 95, "instant")).await;
+    assert_eq!(r.status, 403, "{}", r.json);
+    assert_eq!(problem_slug(&r), "scanning-not-included");
+    assert_eq!(r.padded_len, RESPONSE_SIZE);
+    assert!(
+        !s.h.state
+            .scanner
+            .lease_status(s.account, SystemTime::now())
+            .active
+    );
+
+    // Default mode still works without scanning time.
+    let r = s.wake(&[], Value::Null).await;
+    assert_eq!(r.status, 200, "{}", r.json);
+
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let until =
+        s.h.state
+            .store
+            .add_scan_time(s.account, 3600, "invoice-1", now)
+            .unwrap();
+    let r = s.wake(&[], lease_json(&alice, 95, "instant")).await;
+    assert_eq!(r.status, 200, "{}", r.json);
+    assert_eq!(r.json["lease"]["active"], true);
+    // Clamped to the hour of scanning time, not the 7 days asked for.
+    let at = |secs: u64| UNIX_EPOCH + Duration::from_secs(secs);
+    let scanner = &s.h.state.scanner;
+    assert!(scanner.lease_status(s.account, at(until - 10)).active);
+    assert!(!scanner.lease_status(s.account, at(until + 1)).active);
 }

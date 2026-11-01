@@ -7,16 +7,22 @@
 //! Accounts come from `accounts.txt` in the data directory: one
 //! `<token-sha256-hex> <account-id-hex> [<valid-until-unix>]` per line. The
 //! third field marks a token replaced by rotation, still accepted until then
-//! (spec §4.6). Devices and replay windows are kept in `state.json`.
+//! (spec §4.6). Devices and replay windows are kept in `state.json`, and so
+//! are the account data the issuer interface and idle expiry need (spec
+//! §4.6, `server/ISSUER.md`): scanning end times, the UTC day of each
+//! account's last request (only while idle expiry is on), `add_scan_time`
+//! idempotency keys (hashed), and recently deleted account ids.
 //!
-//! The server rewrites `accounts.txt` on rotation and deletion, and
-//! `new-account` appends to it, both under a lock on `accounts.lock`. The
-//! server re-reads the file before each rewrite, so accounts added while it
-//! runs are kept (they load at the next start).
+//! The server rewrites `accounts.txt` on rotation, deletion, and issuer
+//! `create`, and `new-account` appends to it, all under a lock on
+//! `accounts.lock`. The server re-reads the file before each rewrite, so
+//! accounts `new-account` adds while it runs are kept (they load at the
+//! next start); accounts the issuer creates are live at once.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -31,6 +37,14 @@ const STATE_FILE: &str = "state.json";
 /// How long a rotated-out token keeps working if the new one isn't used
 /// (spec §4.6).
 pub const ROTATION_GRACE_SECS: u64 = 24 * 3600;
+/// How long `add_scan_time` keys and deleted account ids are kept
+/// (`server/ISSUER.md`, spec §4.6).
+pub const ISSUER_RETENTION_SECS: u64 = 30 * 86_400;
+/// Longest issuer idempotency key, in bytes.
+pub const MAX_GRANT_KEY_LEN: usize = 128;
+/// Most scanning time one `add_scan_time` may add: about 10 years.
+pub const MAX_GRANT_SECS: u64 = 3_650 * 86_400;
+const DAY_SECS: u64 = 86_400;
 
 pub type AccountId = [u8; 16];
 
@@ -65,6 +79,41 @@ impl std::fmt::Debug for Device {
 struct State {
     devices: HashMap<String, Device>,
     account_seq: HashMap<String, SeqWindow>,
+    /// Scanning end time, Unix seconds, by account id hex (spec §4.6).
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    scan_until: HashMap<String, u64>,
+    /// The UTC day (days since 1970-01-01) of each account's last
+    /// authenticated request. Kept only while idle expiry is on, and never
+    /// anything finer (spec §4.6).
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    last_active_day: HashMap<String, u32>,
+    /// The day of the last idle sweep. Days after it on which no sweep ran
+    /// (the server was down) don't count against anyone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    last_sweep_day: Option<u32>,
+    /// `add_scan_time` calls already applied, by hex SHA-256 of the
+    /// issuer's key.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    grants: HashMap<String, Grant>,
+    /// Recently deleted accounts, oldest first, for the issuer.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    deletions: Vec<Deletion>,
+    /// The `seq` of the next deletion: never reused, so cursors stay valid.
+    #[serde(default)]
+    next_deletion: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct Grant {
+    account: String,
+    at: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct Deletion {
+    seq: u64,
+    account: String,
+    at: u64,
 }
 
 /// One token hash of an account (a line of `accounts.txt`).
@@ -133,6 +182,26 @@ pub enum RotateError {
     Io(#[from] std::io::Error),
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum CreateError {
+    /// Some account already has this token hash.
+    #[error("token hash already in use")]
+    Taken,
+    #[error("cannot write {ACCOUNTS_FILE}: {0}")]
+    Io(#[from] std::io::Error),
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum GrantError {
+    #[error("unknown account")]
+    UnknownAccount,
+    /// The key was already used for another account.
+    #[error("idempotency key already used for another account")]
+    KeyReused,
+    #[error("cannot write state: {0}")]
+    Io(#[from] std::io::Error),
+}
+
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum StoreError {
     #[error("unknown device")]
@@ -154,6 +223,10 @@ pub struct Store {
     /// Held while writing `state.json`, so two writers can't interleave on
     /// the temp file.
     flush_lock: Mutex<()>,
+    /// Record each account's last-active day (idle expiry is on).
+    track_activity: AtomicBool,
+    /// Keep deleted account ids for the issuer.
+    log_deletions: AtomicBool,
 }
 
 fn hex(bytes: &[u8]) -> String {
@@ -208,6 +281,8 @@ impl Store {
             state: Mutex::new(state),
             dirty: Mutex::new(false),
             flush_lock: Mutex::new(()),
+            track_activity: AtomicBool::new(false),
+            log_deletions: AtomicBool::new(false),
         };
         // Rotated-out tokens past their 24 hours: no reason to keep even
         // their hashes.
@@ -216,6 +291,28 @@ impl Store {
             store.rewrite_accounts(&mut accounts, now, &mut |e| Some(*e), None)?;
         }
         Ok(store)
+    }
+
+    /// Turns on what idle expiry and the issuer need (spec §4.6). Turning
+    /// either off forgets what it kept: activity days, or deleted ids.
+    pub fn configure(&self, track_activity: bool, log_deletions: bool) {
+        self.track_activity.store(track_activity, Ordering::Relaxed);
+        self.log_deletions.store(log_deletions, Ordering::Relaxed);
+        let mut st = self.state.lock().expect("store lock");
+        let mut changed = false;
+        if !track_activity && (!st.last_active_day.is_empty() || st.last_sweep_day.is_some()) {
+            st.last_active_day.clear();
+            st.last_sweep_day = None;
+            changed = true;
+        }
+        if !log_deletions && !st.deletions.is_empty() {
+            st.deletions.clear();
+            changed = true;
+        }
+        drop(st);
+        if changed {
+            self.flush_now();
+        }
     }
 
     /// Appends a new account to `accounts.txt`. Used by `new-account`.
@@ -251,6 +348,7 @@ impl Store {
             }
         }
         let found = found?;
+        self.touch(found.account, now_unix);
         // Only the token rotation replaced (marked with a deadline) goes.
         let replaced = |e: &Entry| e.account == found.account && e.until.is_some();
         let retire = found.until.is_none() && accounts.iter().any(replaced);
@@ -267,6 +365,200 @@ impl Store {
             }
         }
         Some(found.account)
+    }
+
+    /// The account for a token hash, current or still in its rotation
+    /// grace, without the side effects of
+    /// [`authenticate_at`](Self::authenticate_at): for the issuer, so it
+    /// neither retires a token nor counts as the account's activity.
+    pub fn resolve_at(&self, hash: &TokenHash, now_unix: u64) -> Option<AccountId> {
+        let accounts = self.accounts.lock().expect("accounts lock");
+        let mut found = None;
+        for e in accounts.iter() {
+            if TokenHash(e.hash).ct_eq(hash) && e.valid_at(now_unix) {
+                found = Some(e.account);
+            }
+        }
+        found
+    }
+
+    /// Creates an account for a token hash the issuer received from the
+    /// user's device (spec §2.3). It is live at once.
+    pub fn create_account(
+        &self,
+        hash: &TokenHash,
+        now_unix: u64,
+    ) -> Result<AccountId, CreateError> {
+        let mut accounts = self.accounts.lock().expect("accounts lock");
+        // Lines `new-account` appended aren't in memory yet.
+        let on_disk = read_accounts(&self.dir)?;
+        if accounts
+            .iter()
+            .chain(on_disk.iter())
+            .any(|e| TokenHash(e.hash).ct_eq(hash))
+        {
+            return Err(CreateError::Taken);
+        }
+        let mut account = [0u8; 16];
+        rand::fill(&mut account);
+        let added = Entry {
+            hash: hash.0,
+            account,
+            until: None,
+        };
+        self.rewrite_accounts(&mut accounts, now_unix, &mut |e| Some(*e), Some(added))?;
+        drop(accounts);
+        self.touch(account, now_unix);
+        Ok(account)
+    }
+
+    /// Records today as the account's last-active day, if idle expiry is
+    /// on. Written to disk with the next periodic flush, so at most once a
+    /// day per account.
+    fn touch(&self, account: AccountId, now_unix: u64) {
+        if !self.track_activity.load(Ordering::Relaxed) {
+            return;
+        }
+        let today = day(now_unix);
+        let mut st = self.state.lock().expect("store lock");
+        let old = st.last_active_day.insert(hex(&account), today);
+        drop(st);
+        if old != Some(today) {
+            *self.dirty.lock().expect("dirty lock") = true;
+        }
+    }
+
+    /// The account's scanning end time (Unix seconds), if it is in the
+    /// future.
+    pub fn scan_until(&self, account: AccountId, now_unix: u64) -> Option<u64> {
+        let st = self.state.lock().expect("store lock");
+        st.scan_until
+            .get(&hex(&account))
+            .copied()
+            .filter(|&u| u > now_unix)
+    }
+
+    /// Seconds of scanning time the account has left.
+    pub fn scan_secs_left(&self, account: AccountId, now_unix: u64) -> u64 {
+        self.scan_until(account, now_unix)
+            .map_or(0, |u| u - now_unix)
+    }
+
+    /// Adds `secs` of scanning time, after whatever is left, or from now.
+    /// A `key` already applied to this account adds nothing and returns the
+    /// current end time, so the issuer may retry. Written to disk before it
+    /// returns.
+    pub fn add_scan_time(
+        &self,
+        account: AccountId,
+        secs: u64,
+        key: &str,
+        now_unix: u64,
+    ) -> Result<u64, GrantError> {
+        if !self.has_account_at(account, now_unix) {
+            return Err(GrantError::UnknownAccount);
+        }
+        let id = hex(&account);
+        let key_hash = TokenHash::of_text(key).to_hex();
+        let mut st = self.state.lock().expect("store lock");
+        if let Some(g) = st.grants.get(&key_hash) {
+            if g.account != id {
+                return Err(GrantError::KeyReused);
+            }
+            return Ok(st.scan_until.get(&id).copied().unwrap_or(now_unix));
+        }
+        let old = st.scan_until.get(&id).copied();
+        let until = old
+            .filter(|&u| u > now_unix)
+            .unwrap_or(now_unix)
+            .saturating_add(secs);
+        st.scan_until.insert(id.clone(), until);
+        st.grants.insert(
+            key_hash.clone(),
+            Grant {
+                account: id.clone(),
+                at: now_unix,
+            },
+        );
+        drop(st);
+        if let Err(e) = self.flush_strict() {
+            // Undo, so a retry with the same key applies it.
+            let mut st = self.state.lock().expect("store lock");
+            st.grants.remove(&key_hash);
+            match old {
+                Some(u) => st.scan_until.insert(id, u),
+                None => st.scan_until.remove(&id),
+            };
+            return Err(e.into());
+        }
+        Ok(until)
+    }
+
+    /// Accounts deleted after deletion `after`, oldest first, at most
+    /// `limit`, and the cursor to pass next. Kept for
+    /// [`ISSUER_RETENTION_SECS`].
+    pub fn deletions(&self, after: u64, limit: usize) -> (Vec<AccountId>, u64) {
+        let st = self.state.lock().expect("store lock");
+        let page: Vec<&Deletion> = st
+            .deletions
+            .iter()
+            .filter(|d| d.seq > after)
+            .take(limit)
+            .collect();
+        let next = page.last().map_or(after, |d| d.seq);
+        let ids = page
+            .iter()
+            .filter_map(|d| unhex::<16>(&d.account))
+            .collect();
+        (ids, next)
+    }
+
+    /// The daily housekeeping for idle expiry and the issuer. Returns the
+    /// accounts idle for more than `idle_days` (0: none) with no scanning
+    /// time left; the caller deletes them.
+    ///
+    /// Also forgets scanning end times that have passed, activity days of
+    /// accounts that no longer exist, and issuer records past
+    /// [`ISSUER_RETENTION_SECS`]. Accounts without an activity day (new, or
+    /// from before idle expiry was turned on) get today.
+    pub fn sweep(&self, idle_days: u32, now_unix: u64) -> Vec<AccountId> {
+        let live: std::collections::HashSet<String> = {
+            let accounts = self.accounts.lock().expect("accounts lock");
+            accounts
+                .iter()
+                .filter(|e| e.valid_at(now_unix))
+                .map(|e| hex(&e.account))
+                .collect()
+        };
+        let today = day(now_unix);
+        let cutoff = now_unix.saturating_sub(ISSUER_RETENTION_SECS);
+        let mut st = self.state.lock().expect("store lock");
+        st.scan_until
+            .retain(|a, u| *u > now_unix && live.contains(a));
+        st.grants.retain(|_, g| g.at > cutoff);
+        st.deletions.retain(|d| d.at > cutoff);
+        let mut idle = Vec::new();
+        if self.track_activity.load(Ordering::Relaxed) && idle_days > 0 {
+            // Days the server was down don't count (spec §4.6).
+            let missed = st
+                .last_sweep_day
+                .map_or(0, |last| today.saturating_sub(last).saturating_sub(1));
+            st.last_sweep_day = Some(today);
+            st.last_active_day.retain(|a, _| live.contains(a));
+            for a in &live {
+                let d = st.last_active_day.entry(a.clone()).or_insert(today);
+                *d = d.saturating_add(missed).min(today);
+            }
+            for (a, &d) in &st.last_active_day {
+                let has_time = st.scan_until.contains_key(a);
+                if today.saturating_sub(d) > idle_days && !has_time {
+                    idle.extend(unhex::<16>(a));
+                }
+            }
+        }
+        drop(st);
+        self.flush_now();
+        idle
     }
 
     /// Replaces the token `presented` (spec §4.6). `presented` keeps
@@ -317,7 +609,10 @@ impl Store {
 
     /// Whether the account still exists.
     pub fn has_account(&self, account: AccountId) -> bool {
-        let now = now_unix();
+        self.has_account_at(account, now_unix())
+    }
+
+    pub fn has_account_at(&self, account: AccountId, now: u64) -> bool {
         self.accounts
             .lock()
             .expect("accounts lock")
@@ -325,8 +620,10 @@ impl Store {
             .any(|e| e.account == account && e.valid_at(now))
     }
 
-    /// Deletes the account's token hashes, devices, and replay window
-    /// (spec §4.6). The scanner's lease and events are the caller's to drop.
+    /// Deletes the account's token hashes, devices, replay window, scanning
+    /// end time, and activity day (spec §4.6). With the issuer on, its id
+    /// is kept in the deletion log. The scanner's lease and events are the
+    /// caller's to drop.
     pub fn delete_account(&self, account: AccountId) -> std::io::Result<()> {
         {
             let mut accounts = self.accounts.lock().expect("accounts lock");
@@ -339,8 +636,21 @@ impl Store {
         }
         {
             let mut st = self.state.lock().expect("store lock");
+            let id = hex(&account);
             st.devices.retain(|_, d| d.account != account);
-            st.account_seq.remove(&hex(&account));
+            st.account_seq.remove(&id);
+            st.scan_until.remove(&id);
+            st.last_active_day.remove(&id);
+            st.grants.retain(|_, g| g.account != id);
+            if self.log_deletions.load(Ordering::Relaxed) {
+                let seq = st.next_deletion + 1;
+                st.next_deletion = seq;
+                st.deletions.push(Deletion {
+                    seq,
+                    account: id,
+                    at: now_unix(),
+                });
+            }
         }
         self.flush_now();
         Ok(())
@@ -537,13 +847,21 @@ impl Store {
     }
 
     fn flush_now(&self) {
+        if let Err(e) = self.flush_strict() {
+            tracing::error!(error = %e, "failed to write state");
+            *self.dirty.lock().expect("dirty lock") = true;
+        }
+    }
+
+    /// Writes `state.json` now, reporting failure.
+    fn flush_strict(&self) -> std::io::Result<()> {
         let _writing = self.flush_lock.lock().expect("flush lock");
         let bytes = {
             let st = self.state.lock().expect("store lock");
             serde_json::to_vec(&*st).expect("state serializes")
         };
         let tmp = self.dir.join(format!("{STATE_FILE}.tmp"));
-        let result = crate::keys::private_file()
+        crate::keys::private_file()
             .write(true)
             .create(true)
             .truncate(true)
@@ -553,11 +871,7 @@ impl Store {
                 f.write_all(&bytes)?;
                 f.sync_all()
             })
-            .and_then(|()| std::fs::rename(&tmp, self.dir.join(STATE_FILE)));
-        if let Err(e) = result {
-            tracing::error!(error = %e, "failed to write state");
-            *self.dirty.lock().expect("dirty lock") = true;
-        }
+            .and_then(|()| std::fs::rename(&tmp, self.dir.join(STATE_FILE)))
     }
 }
 
@@ -605,6 +919,21 @@ fn lock_accounts(dir: &Path) -> std::io::Result<std::fs::File> {
         .open(dir.join(ACCOUNTS_LOCK))?;
     f.lock()?;
     Ok(f)
+}
+
+/// The UTC day of a Unix time: days since 1970-01-01.
+fn day(unix: u64) -> u32 {
+    u32::try_from(unix / DAY_SECS).unwrap_or(u32::MAX)
+}
+
+/// An account id as the issuer interface writes it: lowercase hex.
+pub fn account_hex(account: &AccountId) -> String {
+    hex(account)
+}
+
+/// Parses [`account_hex`].
+pub fn parse_account(s: &str) -> Option<AccountId> {
+    unhex::<16>(s)
 }
 
 fn now_unix() -> u64 {
@@ -919,5 +1248,159 @@ mod tests {
         let dir = tmp();
         std::fs::write(dir.join(ACCOUNTS_FILE), "nothex 00\n").unwrap();
         assert!(Store::open(&dir).is_err());
+    }
+
+    const T0: u64 = 1_800_000_000;
+
+    fn new_hash() -> TokenHash {
+        AccountToken::generate().unwrap().hash()
+    }
+
+    fn state_json(dir: &Path) -> serde_json::Value {
+        serde_json::from_slice(&std::fs::read(dir.join(STATE_FILE)).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn issuer_accounts_are_live_and_resolve_has_no_side_effects() {
+        let dir = tmp();
+        let store = Store::open(&dir).unwrap();
+        store.configure(true, true);
+        let old = new_hash();
+        let a = store.create_account(&old, T0).unwrap();
+        assert!(matches!(
+            store.create_account(&old, T0),
+            Err(CreateError::Taken)
+        ));
+        assert_eq!(store.authenticate_at(&old, T0), Some(a));
+        assert_eq!(store.resolve_at(&new_hash(), T0), None);
+
+        // Resolving the new token doesn't retire the old one.
+        let new = new_hash();
+        store.rotate_token(a, &old, &new, T0).unwrap();
+        assert_eq!(store.resolve_at(&new, T0), Some(a));
+        assert_eq!(store.resolve_at(&old, T0), Some(a));
+        assert_eq!(store.authenticate_at(&new, T0), Some(a));
+        assert_eq!(store.resolve_at(&old, T0), None);
+
+        // On disk too.
+        let again = Store::open(&dir).unwrap();
+        assert_eq!(again.resolve_at(&new, T0), Some(a));
+    }
+
+    #[test]
+    fn scan_time_stacks_is_idempotent_and_survives_a_restart() {
+        let dir = tmp();
+        let store = Store::open(&dir).unwrap();
+        let a = store.create_account(&new_hash(), T0).unwrap();
+        let b = store.create_account(&new_hash(), T0).unwrap();
+        assert_eq!(store.scan_until(a, T0), None);
+        assert_eq!(store.add_scan_time(a, 100, "k1", T0).unwrap(), T0 + 100);
+        assert_eq!(store.add_scan_time(a, 100, "k1", T0 + 5).unwrap(), T0 + 100);
+        assert_eq!(store.add_scan_time(a, 50, "k2", T0 + 10).unwrap(), T0 + 150);
+        assert!(matches!(
+            store.add_scan_time(b, 50, "k2", T0),
+            Err(GrantError::KeyReused)
+        ));
+        assert!(matches!(
+            store.add_scan_time([9; 16], 50, "k3", T0),
+            Err(GrantError::UnknownAccount)
+        ));
+        assert_eq!(store.scan_secs_left(a, T0 + 140), 10);
+        // After it runs out, new time starts from now.
+        assert_eq!(
+            store.add_scan_time(a, 10, "k3", T0 + 1000).unwrap(),
+            T0 + 1010
+        );
+
+        // Written before returning; the key isn't stored in the clear.
+        let again = Store::open(&dir).unwrap();
+        assert_eq!(again.scan_until(a, T0 + 1000), Some(T0 + 1010));
+        assert_eq!(
+            again.add_scan_time(a, 10, "k3", T0 + 1000).unwrap(),
+            T0 + 1010
+        );
+        let text = std::fs::read_to_string(dir.join(STATE_FILE)).unwrap();
+        assert!(!text.contains("k3\""));
+    }
+
+    /// Spec §4.6: only the UTC day is kept, and nothing at all when idle
+    /// expiry is off.
+    #[test]
+    fn activity_is_kept_as_a_day_only_while_idle_expiry_is_on() {
+        let dir = tmp();
+        let store = Store::open(&dir).unwrap();
+        let h = new_hash();
+        let a = store.create_account(&h, T0).unwrap();
+        store.authenticate_at(&h, T0 + 1234);
+        store.flush_now();
+        assert!(state_json(&dir).get("last_active_day").is_none());
+
+        store.configure(true, false);
+        store.authenticate_at(&h, T0 + 1234);
+        store.flush_if_dirty();
+        let days = &state_json(&dir)["last_active_day"];
+        assert_eq!(days[hex(&a)], (T0 + 1234) / 86_400);
+        // A second request the same day changes nothing to write.
+        store.authenticate_at(&h, T0 + 2000);
+        assert!(!*store.dirty.lock().unwrap());
+
+        let again = Store::open(&dir).unwrap();
+        again.configure(false, false);
+        assert!(state_json(&dir).get("last_active_day").is_none());
+    }
+
+    #[test]
+    fn idle_sweep_skips_downtime_and_accounts_with_scanning_time() {
+        let dir = tmp();
+        let store = Store::open(&dir).unwrap();
+        store.configure(true, false);
+        let idle = store.create_account(&new_hash(), T0).unwrap();
+        let paid = store.create_account(&new_hash(), T0).unwrap();
+        store.add_scan_time(paid, 100 * 86_400, "p", T0).unwrap();
+        let day = |d: u64| T0 + d * 86_400;
+        // The server sweeps hourly, so a day with no sweep is a day it was
+        // down.
+        for d in 0..=5 {
+            assert!(store.sweep(10, day(d)).is_empty(), "day {d}");
+        }
+        // Down from day 6 to day 29: those 24 days don't count, so the idle
+        // account's 11th counted day is day 35.
+        for d in 30..=34 {
+            assert!(store.sweep(10, day(d)).is_empty(), "day {d}");
+        }
+        assert_eq!(store.sweep(10, day(35)), vec![idle]);
+        store.delete_account(idle).unwrap();
+        // Once its scanning time is over, the paid account goes too.
+        for d in 36..=99 {
+            assert!(store.sweep(10, day(d)).is_empty(), "day {d}");
+        }
+        assert_eq!(store.sweep(10, day(100)), vec![paid]);
+    }
+
+    #[test]
+    fn deletions_are_logged_only_for_an_issuer_and_kept_30_days() {
+        let dir = tmp();
+        let store = Store::open(&dir).unwrap();
+        let a = store.create_account(&new_hash(), T0).unwrap();
+        store.add_scan_time(a, 100, "k", T0).unwrap();
+        store.delete_account(a).unwrap();
+        assert_eq!(store.deletions(0, 10), (vec![], 0));
+        assert!(state_json(&dir).get("scan_until").is_none());
+        assert!(state_json(&dir).get("grants").is_none());
+
+        store.configure(false, true);
+        let b = store.create_account(&new_hash(), T0).unwrap();
+        let c = store.create_account(&new_hash(), T0).unwrap();
+        store.delete_account(b).unwrap();
+        store.delete_account(c).unwrap();
+        assert_eq!(store.deletions(0, 1), (vec![b], 1));
+        assert_eq!(store.deletions(1, 10), (vec![c], 2));
+        assert_eq!(store.deletions(2, 10), (vec![], 2));
+        store.sweep(0, now_unix() + ISSUER_RETENTION_SECS + 1);
+        assert_eq!(store.deletions(0, 10), (vec![], 0));
+        // Cursors are never reused.
+        let d = store.create_account(&new_hash(), T0).unwrap();
+        store.delete_account(d).unwrap();
+        assert_eq!(store.deletions(2, 10), (vec![d], 3));
     }
 }

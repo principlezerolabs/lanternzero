@@ -39,7 +39,43 @@ pub struct Config {
     /// Memory hygiene (spec §6.2); see [`crate::hardening`].
     #[serde(default)]
     pub hardening: crate::hardening::HardeningConfig,
+    /// Who may scan, idle expiry, and the issuer socket (spec §4.6). The
+    /// defaults leave every account as it was: scanning for all, never
+    /// deleted for being idle, no socket.
+    #[serde(default)]
+    pub accounts: AccountsConfig,
 }
+
+/// Which accounts may lend keys (spec §4.6).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ScanningPolicy {
+    /// Every account.
+    #[default]
+    All,
+    /// Only accounts with scanning time left, which the issuer adds.
+    Entitled,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AccountsConfig {
+    #[serde(default)]
+    pub scanning: ScanningPolicy,
+    /// Delete accounts after this many days without an authenticated
+    /// request, unless they have scanning time left. 0 means never, and
+    /// then no activity dates are stored at all.
+    #[serde(default)]
+    pub idle_account_days: u32,
+    /// Serve the issuer interface on `<data_dir>/issuer.sock` (mode 0600;
+    /// `server/ISSUER.md`). Never over TCP or OHTTP.
+    #[serde(default)]
+    pub issuer_socket: bool,
+}
+
+/// The shortest idle period allowed: longer than the longest lease, so a
+/// phone that is off for a week keeps its account.
+pub const MIN_IDLE_ACCOUNT_DAYS: u32 = 8;
 
 /// The Zaino or lightwalletd server to follow.
 #[derive(Debug, Clone, Deserialize)]
@@ -126,6 +162,13 @@ pub enum ConfigError {
     DirectApi,
     #[error("chain.poll_secs must be between 1 and 60")]
     PollSecs,
+    #[error("accounts.idle_account_days must be 0 (never) or at least {MIN_IDLE_ACCOUNT_DAYS}")]
+    IdleDays,
+    #[error(
+        "accounts.scanning = \"entitled\" needs accounts.issuer_socket = true: \
+         nothing else can give accounts scanning time"
+    )]
+    EntitledWithoutIssuer,
 }
 
 impl Config {
@@ -148,6 +191,13 @@ impl Config {
             && !(1..=60).contains(&chain.poll_secs)
         {
             return Err(ConfigError::PollSecs);
+        }
+        let accounts = &self.accounts;
+        if accounts.idle_account_days != 0 && accounts.idle_account_days < MIN_IDLE_ACCOUNT_DAYS {
+            return Err(ConfigError::IdleDays);
+        }
+        if accounts.scanning == ScanningPolicy::Entitled && !accounts.issuer_socket {
+            return Err(ConfigError::EntitledWithoutIssuer);
         }
         Ok(())
     }

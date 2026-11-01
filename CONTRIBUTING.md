@@ -28,8 +28,8 @@ every test passes.
    crash dumps, in backups, or in metrics. A server restart drops them; apps
    re-send keys at their next wake.
 2. A key is a **lease**, 24 h to 7 days, renewed by the app on each wake. It
-   is dropped at once on opt-out, when the lease expires, or when the paid
-   period ends.
+   is dropped at once on opt-out, when the lease expires, or when the
+   account's scanning time ends.
 3. Data derived from a key (matched payments) is deleted when the app
    acknowledges it, or after 7 days at most. Keep no per-key history.
 4. **Default-mode and scanning-mode users must look identical on the wire.**
