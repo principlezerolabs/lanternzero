@@ -13,7 +13,7 @@ use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use lz_proto::api::{Event, Ping, PingType};
 use lz_proto::padding::pad_ping_json;
-use rand::Rng;
+use rand::RngExt;
 use tokio::task::JoinSet;
 
 use crate::AppState;
