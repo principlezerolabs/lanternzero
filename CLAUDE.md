@@ -8,8 +8,9 @@ bridge until Zcash's Tachyon upgrade changes how wallets find payments. Read
 draft protocol spec is `spec/v0.md` (rev 3.12); `crates/lz-proto` holds the
 shared protocol types; `server/` is a prototype (OHTTP gateway, devices,
 30-minute pings, chain follower, and the scanner with in-memory leases,
-events, hints, and long-poll); `gateway/` and `client/core` are
-prototypes too. Each README says what's missing.
+events, hints, and long-poll); `gateway/`, `client/core`, and the
+`deploy/` Compose kit (with `lz-server init`) are prototypes too. Each
+README says what's missing.
 This is the public, open-source repo (MIT OR Apache-2.0). Business and hosting details live in the private
 `principlezerolabs/lanternzero-ops` repo; never put them here.
 

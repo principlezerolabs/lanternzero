@@ -1,6 +1,10 @@
 # Self-host packaging: design note
 
-**Status:** proposal (2026-10-31). Nothing here is built yet.
+**Status:** proposal (2026-10-31). Layer 1 is a prototype (2026-11-01):
+`lz-server init` and `doctor`, and the Compose kit with both profiles and
+the §6.2 hardening, tested on regtest by `smoke-test.sh`. Not built yet:
+signed, published images, `doctor`'s reachability and clock checks, and
+layers 3 and 4.
 
 Packaging is not the hard part of self-hosting Lantern Zero. Two other
 things are:
@@ -127,6 +131,10 @@ A short "Compose on any VPS" page covers this case.
 ## Not decided
 
 - Whether the `full` profile uses Zaino or lightwalletd, pending the Zaino
-  disk measurements (phase 1, item 4).
-- Which Tor image to use, and who maintains it.
+  disk measurements (phase 1, item 4). The prototype uses Zaino, as the
+  rest of the repo does.
+- Which Tor image to use, and who maintains it. The prototype builds its
+  own (`tor/Dockerfile`: Debian's `tor` package, non-root), so the kit
+  trusts no third-party image; we would maintain it. Its package version
+  isn't pinned yet.
 - Minimum host size for `full`, pending the same measurements.

@@ -1,0 +1,8 @@
+# Tor for the Lantern Zero onion service (spec §3.1). Only an onion
+# service: no SOCKS port, no relaying. compose.yaml passes the service
+# itself on the command line (`--HiddenServiceDir /var/lib/tor/lz
+# --HiddenServicePort ...`), because Tor needs an IP address for the port,
+# which comes from .env, and the two lines must stay together in order.
+SocksPort 0
+DataDirectory /var/lib/tor
+Log notice stdout

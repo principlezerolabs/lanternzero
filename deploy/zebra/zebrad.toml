@@ -1,0 +1,13 @@
+# Zebra for the `full` profile. The first sync takes days and about 300 GB.
+
+[network]
+network = "Mainnet"
+
+[state]
+cache_dir = "/home/zebra/.cache/zebra"
+
+[rpc]
+# Zaino reads blocks over JSON-RPC. The port is published nowhere; it is
+# reachable only on the kit's Docker networks.
+listen_addr = "0.0.0.0:8232"
+enable_cookie_auth = false

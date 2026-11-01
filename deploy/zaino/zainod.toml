@@ -1,0 +1,14 @@
+# Zaino for the `full` profile: serves the lightwalletd gRPC API
+# (CompactTxStreamer) to the server, from the Zebra next to it.
+backend = 'fetch'
+network = 'Mainnet'
+
+[grpc_settings]
+# Plain gRPC: reachable only on the kit's internal `chain` network.
+listen_address = '0.0.0.0:8137'
+
+[validator_settings]
+validator_jsonrpc_listen_address = 'zebra:8232'
+
+[storage.database]
+path = '/zaino-data'

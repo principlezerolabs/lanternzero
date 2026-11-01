@@ -86,6 +86,16 @@ jobs:
       - if: always()
         run: docker compose -f deploy/regtest/compose.yaml down
 
+  # The self-hosting kit's byo-node profile against the regtest chain:
+  # image builds, `init`, hardening, and `doctor` (deploy/smoke-test.sh).
+  deploy-kit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: bash deploy/smoke-test.sh
+
   # Advisories, licenses, banned crates and features (including ohttp's
   # nss and unsafe-print-secrets), and sources. Policy: deny.toml.
   cargo-deny:

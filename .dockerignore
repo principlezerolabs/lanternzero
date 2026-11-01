@@ -1,0 +1,12 @@
+# Build context for deploy/server.Dockerfile.
+target/
+.git/
+.github/
+deploy/
+# Never send local secrets or server state into the build.
+**/.env
+**/.env.*
+**/*.pem
+**/*.key
+**/lz-data/
+**/lz-gateway-data/
