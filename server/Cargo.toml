@@ -53,9 +53,6 @@ time = { version = "0.3.47", features = ["formatting"] }
 tonic = { version = "0.14", default-features = false, features = ["server", "router"] }
 tonic-prost = "0.14"
 tokio-stream = { version = "0.1", features = ["net"] }
-# Building real (unproven) transactions for the mempool tests. The Zcash
-# crates use rand 0.10; the server itself uses 0.9.
-rand010 = { package = "rand", version = "0.10" }
 redjubjub = "0.9"
 sapling = { package = "sapling-crypto", version = "0.9", default-features = false, features = ["std", "test-dependencies"] }
 ohttp = { version = "0.8", default-features = false, features = ["client", "server", "rust-hpke"] }

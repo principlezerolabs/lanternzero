@@ -172,14 +172,14 @@ pub fn full_tx(to: &Wallet, sapling_out: bool, ironwood_out: bool) -> Vec<u8> {
     use orchard::builder::{Builder as OBuilder, BundleType as OBundleType};
     use orchard::bundle::{Authorized as OAuthorized, BundleVersion};
     use orchard::primitives::redpallas;
-    use rand010::SeedableRng;
+    use rand::SeedableRng;
     use zcash_primitives::transaction::TransactionData;
     use zcash_protocol::consensus::{BlockHeight, BranchId};
     use zcash_protocol::value::ZatBalance;
 
-    let mut rng = rand010::rngs::StdRng::seed_from_u64(7);
+    let mut rng = rand::rngs::StdRng::seed_from_u64(7);
 
-    let orchard_bundle = |version: BundleVersion, rng: &mut rand010::rngs::StdRng| {
+    let orchard_bundle = |version: BundleVersion, rng: &mut rand::rngs::StdRng| {
         let mut b = OBuilder::new(
             OBundleType::DEFAULT,
             version,

@@ -17,7 +17,7 @@ use lz_proto::api::{
 use lz_proto::lease::clamp_duration;
 use lz_proto::padding::RESPONSE_SIZE;
 use lz_proto::token::TokenHash;
-use rand::Rng;
+use rand::RngExt;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use zeroize::Zeroize;
