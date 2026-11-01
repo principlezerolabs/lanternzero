@@ -19,7 +19,7 @@ ohttp = { version = "0.8", default-features = false, features = ["server", "rust
 aes-gcm = "0.11"
 hkdf = "0.13"
 p256 = { version = "0.14", features = ["ecdh", "ecdsa"] }
-rand = "0.9"
+rand = "0.10"
 reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

@@ -15,7 +15,7 @@ chacha20poly1305 = "0.11"
 gcp_auth = { version = "0.12", default-features = false, features = ["aws-lc-rs", "webpki-roots"] }
 http = "1"
 p256 = { version = "0.14", features = ["ecdsa", "pem"] }
-rand = "0.9"
+rand = "0.10"
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "http2"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
