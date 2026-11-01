@@ -21,6 +21,7 @@ pub mod config;
 pub mod doctor;
 pub mod gateway;
 pub mod hardening;
+pub mod init;
 pub mod issuer;
 pub mod keys;
 pub mod limits;

@@ -40,10 +40,9 @@ scanning also against real Zebra and Zaino on regtest
   them off disk meanwhile.
 - **Webhooks** (§4.5).
 - **OHTTP key rotation.** The OHTTP key configuration doesn't rotate yet.
-- **More `doctor` checks and `init`** (deploy/DESIGN.md). `doctor` doesn't
-  yet check that the onion service or OHTTP gateway answers from outside,
-  or the clock beyond what the tip's age shows; `lz-server init` doesn't
-  exist yet.
+- **More `doctor` checks** (deploy/DESIGN.md). `doctor` doesn't yet check
+  that the onion service or OHTTP gateway answers from outside, or the
+  clock beyond what the tip's age shows.
 - **Live account loading for `new-account`.** Accounts the CLI adds take
   effect after a restart; accounts made through the issuer socket are live
   at once.
@@ -60,6 +59,15 @@ cargo run -p lz-server -- server/examples/config.toml
 
 Put TLS in front of it (a reverse proxy), and point an OHTTP relay at
 `https://<public_host>/.well-known/ohttp-gateway`.
+
+### Setting up a self-hosted server
+
+`lz-server <config.toml> init …` writes `config.toml` (mode 0600, never over
+an existing one), the data directory and the server's keys, and the first
+account, and prints its connection URL once. With `--onion-hostname-file`
+it waits for Tor to write the onion address. The Compose kit in
+[`deploy/`](../deploy/README.md) runs it for you; `init` with no options
+prints them all.
 
 ### Rotating the VAPID key
 

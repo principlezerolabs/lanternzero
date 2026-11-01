@@ -1,4 +1,7 @@
 //! `lz-server <config.toml>` runs the server.
+//! `lz-server <config.toml> init …` writes the config, keys, and first
+//! account for a self-hosted server (deploy/DESIGN.md; `init` with no
+//! options prints its usage).
 //! `lz-server <config.toml> new-account` creates an account and prints its
 //! connection URL once (self-hosting; spec §2.3).
 //! `lz-server <config.toml> rotate-vapid [--drop-old]` replaces the VAPID
@@ -10,9 +13,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Duration;
 
-use lz_proto::token::AccountToken;
 use lz_server::config::Config;
-use lz_server::store::Store;
 use lz_server::{AppState, chain, gateway, mempool, push, scanner};
 
 #[tokio::main]
@@ -22,13 +23,19 @@ async fn main() -> ExitCode {
         .init();
 
     let args: Vec<String> = std::env::args().skip(1).collect();
+    // `init` writes the config, so it runs before any config is loaded.
+    if let [c, cmd, rest @ ..] = args.as_slice()
+        && cmd == "init"
+    {
+        return init(&PathBuf::from(c), rest);
+    }
     let (config_path, command, flag) = match args.as_slice() {
         [c] => (PathBuf::from(c), None, None),
         [c, cmd] => (PathBuf::from(c), Some(cmd.as_str()), None),
         [c, cmd, flag] => (PathBuf::from(c), Some(cmd.as_str()), Some(flag.as_str())),
         _ => {
             tracing::error!(
-                "usage: lz-server <config.toml> [new-account | rotate-vapid [--drop-old] | doctor]"
+                "usage: lz-server <config.toml> [init … | new-account | rotate-vapid [--drop-old] | doctor]"
             );
             return ExitCode::FAILURE;
         }
@@ -228,27 +235,42 @@ fn rotate_vapid(config: &Config, drop_old: bool) -> ExitCode {
 /// connection URL once. The running server picks it up on restart.
 #[allow(clippy::print_stdout)] // Deliberate: the operator must see the URL once.
 fn new_account(config: &Config) -> ExitCode {
-    if let Err(e) = lz_server::keys::create_private_dir(&config.data_dir) {
-        tracing::error!(error = %e, "cannot create data_dir");
-        return ExitCode::FAILURE;
-    }
-    let token = match AccountToken::generate() {
-        Ok(t) => t,
+    match lz_server::init::new_account_url(config) {
+        Ok(url) => {
+            println!("{}", url.as_str());
+            println!("Restart the server to load the new account. This URL is shown only once.");
+            ExitCode::SUCCESS
+        }
         Err(e) => {
-            tracing::error!(error = %e, "cannot generate token");
+            tracing::error!(error = %e, "cannot create the account");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// Writes the config, data directory, and server keys, and prints the
+/// first account's connection URL once (deploy/DESIGN.md).
+#[allow(clippy::print_stdout)] // Deliberate: the operator must see the URL once.
+fn init(config_path: &std::path::Path, args: &[String]) -> ExitCode {
+    let opts = match lz_server::init::parse_args(args) {
+        Ok(o) => o,
+        Err(e) => {
+            tracing::error!("{e}");
             return ExitCode::FAILURE;
         }
     };
-    if let Err(e) = Store::add_account_to_file(&config.data_dir, &token.hash()) {
-        tracing::error!(error = %e, "cannot write account");
-        return ExitCode::FAILURE;
+    match lz_server::init::run(config_path, &opts) {
+        Ok(url) => {
+            println!("Your connection URL (paste it into your wallet; shown only once):");
+            println!();
+            println!("{}", url.as_str());
+            println!();
+            println!("Then start the server, and check it with `doctor`.");
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "init failed");
+            ExitCode::FAILURE
+        }
     }
-    println!(
-        "lanternzero://{}{}#{}",
-        config.public_host,
-        config.base_path,
-        token.encode().as_str()
-    );
-    println!("Restart the server to load the new account. This URL is shown only once.");
-    ExitCode::SUCCESS
 }
