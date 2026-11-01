@@ -10,11 +10,22 @@ the real server's wake round; not yet against Apple or Google.
 
 ## How it works
 
-- **Stateless.** A subscription is sealed into its own endpoint URL:
-  the device token, the platform, and the bound server key, encrypted and
-  authenticated with the gateway's key (XChaCha20-Poly1305). The gateway
-  stores only that key (`data_dir/endpoint-key`, mode 0600). Servers never
-  see raw device tokens.
+- **No device records.** A subscription is sealed into its own endpoint
+  URL: the device token, the platform, the bound server key, the expiry,
+  and the hash of a revocation secret, encrypted and authenticated with the
+  gateway's sealing key (XChaCha20-Poly1305). Servers never see raw device
+  tokens. On disk, mode 0600, there are only:
+  - `endpoint-keys`: the current sealing key, and retired keys that still
+    open the endpoints they sealed;
+  - `revoked`: a 40-byte record per revoked subscription (the hash and the
+    expiry), dropped once that subscription would have expired anyway.
+- **Expiring.** Subscriptions last `endpoint_lifetime_days` (default 90,
+  at most 365). Pushes after that get `410`, so the server drops the
+  device; wallets renew before then (spec §4.1).
+- **Revocable.** When the user removes a server, the wallet revokes the
+  subscription with the secret it got when subscribing. Every later push
+  gets `410`, so that server can't keep waking the device or showing it
+  alerts. The server holds only the endpoint, so it can't revoke.
 - **Bound to one server** (spec §5.3, decided in issue #6). A push is
   accepted only if its VAPID `k=` is the key the subscription was created
   with, and the JWT is a valid ES256 signature by that key, addressed to
@@ -44,11 +55,22 @@ POST /v0/subscriptions
 { "platform": "apns" | "fcm",
   "token": "<APNs device token, hex | FCM registration token>",
   "server_key": "<vapid_public_key from the server's info, base64url>" }
-→ 201 { "endpoint": "https://<public_origin>/wp/<opaque>" }
+→ 201 { "endpoint": "https://<public_origin>/wp/<opaque>",
+        "expires": <unix seconds>,
+        "revoke_secret": "<base64url>" }
+
+DELETE /v0/subscriptions/<opaque>
+Authorization: Bearer <revoke_secret>
+→ 204 (also when already revoked or expired)
+  401 no secret · 403 wrong secret · 404 not this gateway's endpoint
+  503 revocation list full, try later
 ```
 
-The wallet then registers that endpoint with the server (`POST /v0/devices`).
-A wallet connected to two servers subscribes twice.
+The wallet registers the endpoint with the server (`POST /v0/devices`) and
+keeps `revoke_secret` on the device; the server never sees it. A wallet
+connected to two servers subscribes twice. Before `expires`, the wallet
+subscribes again, registers the new endpoint, deletes the old device record,
+and revokes the old subscription.
 
 ## Push API (servers)
 
@@ -59,8 +81,8 @@ A wallet connected to two servers subscribes twice.
 | `201` | Forwarded |
 | `400` | Missing `TTL`, body not `aes128gcm`, bad `Urgency` or `Topic` |
 | `401` / `403` | Bad VAPID / signed by a key the subscription isn't bound to |
-| `404` | Endpoint not sealed by this gateway |
-| `410` | Apple or Google says the token is gone (the server drops the device) |
+| `404` | Endpoint not sealed by a key this gateway holds |
+| `410` | Subscription expired or revoked, or Apple or Google says the token is gone (the server drops the device) |
 | `413` | Body over 4096 bytes |
 | `429` | Over a rate limit, or the platform asked us to slow down |
 | `502` | The platform failed |
@@ -81,15 +103,32 @@ minutes. FCM uses a service account (`gcp_auth`).
 cargo run -p lz-gateway -- gateway/examples/config.toml
 ```
 
+### Rotating the sealing key
+
+```sh
+lz-gateway rotate-key <config.toml>              # routine
+lz-gateway rotate-key <config.toml> --drop-old   # suspected leak
+```
+
+Then restart the gateway. After a routine rotation, new endpoints use the
+new key; the old key keeps opening the endpoints it sealed for 365 days
+(the longest lifetime), by which time they have all expired, and is then
+dropped. With `--drop-old`, every existing endpoint stops working at once
+(`404`): servers drop the devices, and wallets find out at their next wake
+(`unknown-device`) and subscribe again. Use it when a key may have leaked,
+because a leaked key can forge endpoints.
+
+Losing `data_dir` has the same effect as `--drop-old`, and also forgets
+revocations.
+
 ## Not yet
 
-- **Revocation.** Spec §4.1 says a wallet SHOULD ask its gateway to revoke a
-  subscription when the user removes a server. A stateless gateway can't
-  forget an endpoint it never stored; options are a small revocation list,
-  or endpoints that expire (each sealed endpoint already records when it
-  was created). To decide.
-- **Sealing-key rotation.** Rotating `endpoint-key` invalidates every
-  endpoint at once; a second, older key for opening would allow a
-  changeover.
+- **Abuse of the open wallet API.** Anyone can subscribe and then revoke,
+  so the revocation list could be filled; past 1,000,000 entries,
+  revocations get `503` until old ones expire. Put a per-address rate limit
+  in front of the gateway. App attestation would close this properly.
+- **Several gateway instances.** Rate limits live in memory per instance,
+  and the revocation list is a local file. Run one instance, or share the
+  list.
 - **Tests against real APNs and FCM**, which need the vendor's credentials
   and a device.

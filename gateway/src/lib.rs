@@ -4,9 +4,10 @@
 //! Zero servers push to it with standard Web Push (RFC 8030, VAPID
 //! RFC 8292, RFC 8291 payloads); it forwards to Apple and Google.
 //!
-//! - **Stateless.** The device token and the bound server key are sealed
-//!   into each endpoint URL ([`seal`]). The gateway stores only its own
-//!   sealing key.
+//! - **No device records.** The device token, the bound server key, and
+//!   the expiry are sealed into each endpoint URL ([`seal`]). The gateway
+//!   stores only its sealing keys ([`keys`]) and a list of revoked
+//!   subscriptions that holds nothing about devices ([`revoke`]).
 //! - **Bound.** Each subscription accepts pushes signed by one server key
 //!   ([`vapid`]); there is no admission list.
 //! - **Rate-limited** per device, with background and alert budgets apart,
@@ -15,18 +16,21 @@
 //!   device. Nothing logs device tokens, endpoints, or payloads.
 //!
 //! Wallet API (vendor-internal, not part of the Lantern Zero spec):
-//! `POST /v0/subscriptions` with
-//! `{"platform": "apns" | "fcm", "token": "...", "server_key": "<base64url>"}`
-//! returns `201 {"endpoint": "https://<origin>/wp/<opaque>"}`.
+//! - `POST /v0/subscriptions` with
+//!   `{"platform": "apns" | "fcm", "token": "...", "server_key": "<base64url>"}`
+//!   returns `201 {"endpoint": "https://<origin>/wp/<opaque>",
+//!   "expires": <unix seconds>, "revoke_secret": "<base64url>"}`.
+//! - `DELETE /v0/subscriptions/<opaque>` with
+//!   `Authorization: Bearer <revoke_secret>` revokes it: `204`.
 
 pub mod config;
+pub mod keys;
 pub mod limits;
 pub mod platform;
+pub mod revoke;
 pub mod seal;
 pub mod vapid;
 
-use std::io::Write as _;
-use std::path::Path;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -35,13 +39,18 @@ use axum::body::Bytes;
 use axum::extract::{DefaultBodyLimit, Path as UrlPath, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
-use axum::routing::post;
+use axum::routing::{delete, post};
+use base64::Engine as _;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
+use subtle::ConstantTimeEq as _;
 use zeroize::Zeroizing;
 
+use crate::keys::KeyRing;
 use crate::limits::{Limits, Window};
 use crate::platform::{Apns, Delivery, Fcm, Kind, Push};
+use crate::revoke::{RevokeError, Revoked};
 use crate::seal::{MAX_TOKEN_LEN, Platform, Sealer, Subscription};
 
 /// Largest push body accepted (RFC 8030 §7.2: at least 4096 bytes). The
@@ -49,13 +58,13 @@ use crate::seal::{MAX_TOKEN_LEN, Platform, Sealer, Subscription};
 pub const MAX_PUSH_BODY: usize = 4096;
 /// Longest `TTL` honored: 28 days, as FCM allows.
 const MAX_TTL_SECS: u64 = 28 * 86_400;
-const KEY_FILE: &str = "endpoint-key";
 /// `Retry-After` when Apple or Google throttle us without saying how long.
 const PLATFORM_RETRY_SECS: u64 = 60;
 
 pub struct AppState {
     pub config: config::Config,
     pub sealer: Sealer,
+    pub revoked: Arc<Revoked>,
     pub limits: Limits,
     pub apns: Option<Apns>,
     pub fcm: Option<Fcm>,
@@ -71,8 +80,8 @@ impl std::fmt::Debug for AppState {
 pub enum StartError {
     #[error("data_dir: {0}")]
     Io(#[from] std::io::Error),
-    #[error("endpoint key file is corrupt")]
-    CorruptKey,
+    #[error(transparent)]
+    Keys(#[from] keys::KeyError),
     #[error(transparent)]
     Platform(#[from] platform::PlatformError),
     #[error("HTTP client: {0}")]
@@ -81,7 +90,9 @@ pub enum StartError {
 
 impl AppState {
     pub fn new(config: config::Config) -> Result<Arc<Self>, StartError> {
-        let key = load_or_create_key(&config.data_dir)?;
+        let now = now_unix();
+        let ring = KeyRing::load_or_create(&config.data_dir, now)?;
+        let revoked = Arc::new(Revoked::open(&config.data_dir, now)?);
         let http = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
             .connect_timeout(std::time::Duration::from_secs(5))
@@ -102,7 +113,8 @@ impl AppState {
             per_server: Window::new(l.per_server_per_minute, 60),
         };
         Ok(Arc::new(Self {
-            sealer: Sealer::new(&key),
+            sealer: Sealer::new(&ring),
+            revoked,
             limits,
             apns,
             fcm,
@@ -111,45 +123,10 @@ impl AppState {
     }
 }
 
-/// Reads the sealing key, creating it (mode 0600, in a 0700 directory) on
-/// first start. Losing it invalidates every endpoint.
-fn load_or_create_key(dir: &Path) -> Result<Zeroizing<[u8; 32]>, StartError> {
-    let mut b = std::fs::DirBuilder::new();
-    b.recursive(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::DirBuilderExt;
-        b.mode(0o700);
-    }
-    b.create(dir)?;
-    let path = dir.join(KEY_FILE);
-    match std::fs::read(&path) {
-        Ok(bytes) => {
-            let key: [u8; 32] = bytes.try_into().map_err(|_| StartError::CorruptKey)?;
-            Ok(Zeroizing::new(key))
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            let mut key = Zeroizing::new([0u8; 32]);
-            rand::fill(&mut key[..]);
-            let mut opts = std::fs::OpenOptions::new();
-            opts.write(true).create_new(true);
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::OpenOptionsExt;
-                opts.mode(0o600);
-            }
-            let mut f = opts.open(&path)?;
-            f.write_all(&key[..])?;
-            f.sync_all()?;
-            Ok(key)
-        }
-        Err(e) => Err(e.into()),
-    }
-}
-
 pub fn router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/v0/subscriptions", post(subscribe))
+        .route("/v0/subscriptions/{opaque}", delete(revoke))
         .route("/wp/{opaque}", post(push))
         .layer(DefaultBodyLimit::max(MAX_PUSH_BODY * 2))
         .with_state(state)
@@ -213,19 +190,79 @@ async fn subscribe(State(state): State<Arc<AppState>>, body: Bytes) -> Response 
     let Some(server_key) = vapid::parse_server_key(&req.server_key) else {
         return error(StatusCode::BAD_REQUEST, "invalid server_key");
     };
+    let now = now_unix();
+    let expires = now + state.config.endpoint_lifetime_days * 86_400;
+    // Only the wallet gets the secret; the endpoint carries its hash, so
+    // the server, which holds the endpoint, can't revoke (spec §4.1).
+    let mut secret = Zeroizing::new([0u8; 32]);
+    rand::fill(&mut secret[..]);
     let opaque = state.sealer.seal(&Subscription {
         platform,
         server_key,
         token: Zeroizing::new(token),
-        created: now_unix(),
+        created: now,
+        expires,
+        revoke_hash: revoke::secret_hash(&secret),
     });
     let endpoint = format!("{}/wp/{opaque}", state.config.public_origin);
+    let body = serde_json::json!({
+        "endpoint": endpoint,
+        "expires": expires,
+        "revoke_secret": URL_SAFE_NO_PAD.encode(&secret[..]),
+    })
+    .to_string();
     (
         StatusCode::CREATED,
         [(header::CONTENT_TYPE, "application/json")],
-        serde_json::json!({ "endpoint": endpoint }).to_string(),
+        body,
     )
         .into_response()
+}
+
+/// Revokes a subscription (spec §4.1): later pushes to it get `410`.
+async fn revoke(
+    State(state): State<Arc<AppState>>,
+    UrlPath(opaque): UrlPath<String>,
+    headers: HeaderMap,
+) -> Response {
+    let now = now_unix();
+    let Some(sub) = state.sealer.open(&opaque) else {
+        return error(StatusCode::NOT_FOUND, "no such subscription");
+    };
+    let raw = Zeroizing::new(
+        headers
+            .get(header::AUTHORIZATION)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.strip_prefix("Bearer "))
+            .and_then(|b64| URL_SAFE_NO_PAD.decode(b64.trim()).ok())
+            .unwrap_or_default(),
+    );
+    let Ok(secret) = <&[u8; 32]>::try_from(raw.as_slice()) else {
+        return error(StatusCode::UNAUTHORIZED, "revocation secret required");
+    };
+    if !bool::from(revoke::secret_hash(secret).ct_eq(&sub.revoke_hash)) {
+        return error(StatusCode::FORBIDDEN, "wrong revocation secret");
+    }
+    if now > sub.expires {
+        // Already dead; nothing to keep.
+        return StatusCode::NO_CONTENT.into_response();
+    }
+    let revoked = state.revoked.clone();
+    let result =
+        tokio::task::spawn_blocking(move || revoked.revoke(sub.revoke_hash, sub.expires, now))
+            .await;
+    match result {
+        Ok(Ok(())) => StatusCode::NO_CONTENT.into_response(),
+        Ok(Err(RevokeError::Full)) => {
+            tracing::warn!("revocation list is full");
+            error(StatusCode::SERVICE_UNAVAILABLE, "try again later")
+        }
+        Ok(Err(RevokeError::Io(e))) => {
+            tracing::error!(error = %e, "cannot record a revocation");
+            error(StatusCode::INTERNAL_SERVER_ERROR, "cannot revoke now")
+        }
+        Err(_) => error(StatusCode::INTERNAL_SERVER_ERROR, "cannot revoke now"),
+    }
 }
 
 /// Receives a Web Push message (RFC 8030 §5) and forwards it.
@@ -256,6 +293,14 @@ async fn push(
         Err(vapid::VapidError::Invalid) => {
             return error(StatusCode::UNAUTHORIZED, "invalid VAPID authorization");
         }
+    }
+    // Checked after VAPID, so only the bound server learns of it. Either
+    // way the server drops the device (spec §5.3).
+    if now > sub.expires {
+        return error(StatusCode::GONE, "subscription expired");
+    }
+    if state.revoked.contains(&sub.revoke_hash) {
+        return error(StatusCode::GONE, "subscription revoked");
     }
 
     if body.len() > MAX_PUSH_BODY {

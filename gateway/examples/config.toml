@@ -2,8 +2,11 @@
 listen = "127.0.0.1:8090"
 # Endpoints are built on this origin, and servers' VAPID tokens must name it.
 public_origin = "https://push.example-wallet.app"
-# Holds the endpoint-sealing key. Losing it invalidates every endpoint.
+# Holds the endpoint-sealing keys and the revocation list. Losing it
+# invalidates every endpoint and forgets every revocation.
 data_dir = "./lz-gateway-data"
+# Wallets renew subscriptions before this; at most 365.
+endpoint_lifetime_days = 90
 # Relayed by Apple and Google, so it must say nothing about the payment.
 alert_title = "New activity"
 

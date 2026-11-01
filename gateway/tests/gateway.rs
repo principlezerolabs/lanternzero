@@ -71,6 +71,8 @@ struct Harness {
     server: Vapid,
     http: reqwest::Client,
     data_dir: std::path::PathBuf,
+    config: Config,
+    task: tokio::task::JoinHandle<()>,
 }
 
 fn temp_dir(tag: &str) -> std::path::PathBuf {
@@ -104,6 +106,7 @@ async fn harness_with(limits: LimitsConfig) -> Harness {
         listen: listener.local_addr().unwrap(),
         public_origin: origin.clone(),
         data_dir: dir.join("data"),
+        endpoint_lifetime_days: 90,
         alert_title: "New activity".into(),
         apns: Some(ApnsConfig {
             team_id: "TEAM123456".into(),
@@ -123,8 +126,8 @@ async fn harness_with(limits: LimitsConfig) -> Harness {
     };
     config.validate().unwrap();
     let data_dir = config.data_dir.clone();
-    let state = AppState::new(config).unwrap();
-    tokio::spawn(async move { axum::serve(listener, router(state)).await.unwrap() });
+    let state = AppState::new(config.clone()).unwrap();
+    let task = tokio::spawn(async move { axum::serve(listener, router(state)).await.unwrap() });
     Harness {
         origin,
         apns,
@@ -133,6 +136,8 @@ async fn harness_with(limits: LimitsConfig) -> Harness {
         server: Vapid::from_secret(&[0x22; 32]).unwrap(),
         http: reqwest::Client::new(),
         data_dir,
+        config,
+        task,
     }
 }
 
@@ -143,7 +148,54 @@ async fn harness() -> Harness {
 const APNS_TOKEN: &str = "a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90";
 const FCM_TOKEN: &str = "fcm-registration-token:APA91bExampleExampleExample";
 
+fn now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+}
+
+fn opaque(endpoint: &str) -> &str {
+    endpoint.rsplit('/').next().unwrap()
+}
+
 impl Harness {
+    /// Stops the gateway and starts it again on the same address and data
+    /// directory, as after a deploy.
+    async fn restart(&mut self) {
+        self.task.abort();
+        let _ = (&mut self.task).await;
+        let state = AppState::new(self.config.clone()).unwrap();
+        let listener = tokio::net::TcpListener::bind(self.config.listen)
+            .await
+            .unwrap();
+        self.task =
+            tokio::spawn(async move { axum::serve(listener, router(state)).await.unwrap() });
+        // Pooled connections would still reach the old instance's tasks.
+        self.http = reqwest::Client::new();
+    }
+
+    /// The whole subscribe response: `endpoint`, `expires`, `revoke_secret`.
+    async fn subscription(&self, platform: &str, token: &str) -> Value {
+        let r = self
+            .subscribe(platform, token, &self.server.public_b64)
+            .await;
+        assert_eq!(r.status(), 201);
+        serde_json::from_slice(&r.bytes().await.unwrap()).unwrap()
+    }
+
+    async fn revoke(&self, endpoint: &str, secret: Option<&str>) -> u16 {
+        let mut req = self.http.delete(format!(
+            "{}/v0/subscriptions/{}",
+            self.origin,
+            opaque(endpoint)
+        ));
+        if let Some(s) = secret {
+            req = req.header("authorization", format!("Bearer {s}"));
+        }
+        req.send().await.unwrap().status().as_u16()
+    }
+
     async fn subscribe(&self, platform: &str, token: &str, key: &str) -> reqwest::Response {
         self.http
             .post(format!("{}/v0/subscriptions", self.origin))
@@ -627,23 +679,200 @@ async fn server_wake_round_reaches_the_device_through_the_gateway() {
 }
 
 #[tokio::test]
-async fn keeps_only_its_sealing_key_on_disk() {
+async fn keeps_only_sealing_keys_and_revocations_on_disk() {
     let h = harness().await;
-    h.endpoint("apns", APNS_TOKEN).await;
-    let files: Vec<_> = std::fs::read_dir(&h.data_dir)
+    let sub = h.subscription("apns", APNS_TOKEN).await;
+    let endpoint = sub["endpoint"].as_str().unwrap();
+    let secret = sub["revoke_secret"].as_str().unwrap();
+    assert_eq!(h.revoke(endpoint, Some(secret)).await, 204);
+
+    let mut files: Vec<_> = std::fs::read_dir(&h.data_dir)
         .unwrap()
         .map(|e| e.unwrap().file_name().into_string().unwrap())
         .collect();
-    assert_eq!(files, ["endpoint-key"]);
+    files.sort();
+    assert_eq!(files, ["endpoint-keys", "revoked"]);
+    // One revocation is one 40-byte record: a hash and an expiry, nothing
+    // about the device, the server, or the endpoint.
+    let revoked = std::fs::read(h.data_dir.join("revoked")).unwrap();
+    assert_eq!(revoked.len(), 40);
+    let token = (0..APNS_TOKEN.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&APNS_TOKEN[i..i + 2], 16).unwrap())
+        .collect::<Vec<u8>>();
+    let secret_raw = URL_SAFE_NO_PAD.decode(secret).unwrap();
+    let server_key = URL_SAFE_NO_PAD.decode(&h.server.public_b64).unwrap();
+    for needle in [
+        &token[..],
+        &secret_raw[..],
+        &server_key[..16],
+        opaque(endpoint).as_bytes(),
+    ] {
+        assert!(
+            !revoked.windows(needle.len()).any(|w| w == needle),
+            "revocation list holds more than a hash"
+        );
+    }
     #[cfg(unix)]
-    {
+    for f in files {
         use std::os::unix::fs::PermissionsExt;
-        let mode = std::fs::metadata(h.data_dir.join("endpoint-key"))
+        let mode = std::fs::metadata(h.data_dir.join(&f))
             .unwrap()
             .permissions()
             .mode();
-        assert_eq!(mode & 0o777, 0o600);
+        assert_eq!(mode & 0o777, 0o600, "{f}");
     }
+}
+
+#[tokio::test]
+async fn revoked_subscriptions_are_gone_and_stay_gone() {
+    let mut h = harness().await;
+    let sub = h.subscription("apns", APNS_TOKEN).await;
+    let endpoint = sub["endpoint"].as_str().unwrap().to_owned();
+    let secret = sub["revoke_secret"].as_str().unwrap().to_owned();
+    let expires = sub["expires"].as_u64().unwrap();
+    assert!(expires.abs_diff(now() + 90 * 86_400) < 60);
+    let other = h.subscription("apns", APNS_TOKEN).await;
+    let other_endpoint = other["endpoint"].as_str().unwrap().to_owned();
+    assert_eq!(
+        h.push(&h.server, &endpoint, "normal", &[1; 10])
+            .await
+            .status(),
+        201
+    );
+
+    // The endpoint alone, which the server holds, can't revoke.
+    assert_eq!(h.revoke(&endpoint, None).await, 401);
+    assert_eq!(h.revoke(&endpoint, Some("not-a-secret")).await, 401);
+    assert_eq!(
+        h.revoke(&endpoint, other["revoke_secret"].as_str()).await,
+        403
+    );
+    let mut altered = endpoint.clone();
+    let last = altered.pop().unwrap();
+    altered.push(if last == 'A' { 'B' } else { 'A' });
+    assert_eq!(h.revoke(&altered, Some(&secret)).await, 404);
+
+    assert_eq!(h.revoke(&endpoint, Some(&secret)).await, 204);
+    assert_eq!(h.revoke(&endpoint, Some(&secret)).await, 204, "idempotent");
+    // Spec §4.1: every later push gets 410, so the server drops the device.
+    for urgency in ["normal", "high"] {
+        assert_eq!(
+            h.push(&h.server, &endpoint, urgency, &[1; 10])
+                .await
+                .status(),
+            410
+        );
+    }
+    // Another subscription for the same device is untouched.
+    assert_eq!(
+        h.push(&h.server, &other_endpoint, "normal", &[1; 10])
+            .await
+            .status(),
+        201
+    );
+    assert_eq!(h.apns.take().len(), 2);
+
+    // Revocations survive a restart.
+    h.restart().await;
+    assert_eq!(
+        h.push(&h.server, &endpoint, "normal", &[1; 10])
+            .await
+            .status(),
+        410
+    );
+    assert_eq!(
+        h.push(&h.server, &other_endpoint, "normal", &[1; 10])
+            .await
+            .status(),
+        201
+    );
+}
+
+#[tokio::test]
+async fn expired_subscriptions_are_gone() {
+    let h = harness().await;
+    // Seal one that expired yesterday with the gateway's own key.
+    let ring = lz_gateway::keys::KeyRing::load_or_create(&h.data_dir, now()).unwrap();
+    let token: Vec<u8> = vec![0xA1; 32];
+    let opaque = lz_gateway::seal::Sealer::new(&ring).seal(&lz_gateway::seal::Subscription {
+        platform: lz_gateway::seal::Platform::Apns,
+        server_key: URL_SAFE_NO_PAD
+            .decode(&h.server.public_b64)
+            .unwrap()
+            .try_into()
+            .unwrap(),
+        token: token.into(),
+        created: now() - 2 * 86_400,
+        expires: now() - 86_400,
+        revoke_hash: [0; 32],
+    });
+    let endpoint = format!("{}/wp/{opaque}", h.origin);
+    assert_eq!(
+        h.push(&h.server, &endpoint, "normal", &[1; 10])
+            .await
+            .status(),
+        410
+    );
+    // Only the bound server learns that it expired.
+    let other = Vapid::from_secret(&[0x33; 32]).unwrap();
+    assert_eq!(
+        h.push(&other, &endpoint, "normal", &[1; 10]).await.status(),
+        403
+    );
+    assert!(h.apns.take().is_empty());
+}
+
+#[tokio::test]
+async fn rotating_the_sealing_key_keeps_endpoints_until_dropped() {
+    use lz_gateway::keys::KeyRing;
+    let mut h = harness().await;
+    let old = h.subscription("apns", APNS_TOKEN).await;
+    let old_endpoint = old["endpoint"].as_str().unwrap().to_owned();
+    let key_id = |e: &str| URL_SAFE_NO_PAD.decode(opaque(e)).unwrap()[0];
+
+    // A routine rotation: old endpoints keep working, new ones use the new
+    // key, and old ones can still be revoked.
+    let new_id = KeyRing::rotate(&h.data_dir, now(), false).unwrap();
+    h.restart().await;
+    assert_eq!(
+        h.push(&h.server, &old_endpoint, "normal", &[1; 10])
+            .await
+            .status(),
+        201
+    );
+    let new_endpoint = h.endpoint("apns", APNS_TOKEN).await;
+    assert_eq!(key_id(&new_endpoint), new_id);
+    assert_ne!(key_id(&old_endpoint), new_id);
+    assert_eq!(
+        h.push(&h.server, &new_endpoint, "normal", &[1; 10])
+            .await
+            .status(),
+        201
+    );
+    assert_eq!(
+        h.revoke(&old_endpoint, old["revoke_secret"].as_str()).await,
+        204
+    );
+    assert_eq!(
+        h.push(&h.server, &old_endpoint, "normal", &[1; 10])
+            .await
+            .status(),
+        410
+    );
+
+    // After a suspected leak, every old endpoint stops working at once;
+    // servers drop the devices and wallets register again.
+    KeyRing::rotate(&h.data_dir, now(), true).unwrap();
+    h.restart().await;
+    for e in [&old_endpoint, &new_endpoint] {
+        assert_eq!(h.push(&h.server, e, "normal", &[1; 10]).await.status(), 404);
+    }
+    let fresh = h.endpoint("apns", APNS_TOKEN).await;
+    assert_eq!(
+        h.push(&h.server, &fresh, "normal", &[1; 10]).await.status(),
+        201
+    );
 }
 
 /// A `MakeWriter` that appends every log line to a shared buffer.
@@ -667,7 +896,7 @@ impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogBuf {
     }
 }
 
-/// Device tokens and endpoints never reach the logs, even at trace level
+/// Device tokens, endpoints, and revocation secrets never reach the logs, even at trace level
 /// and on failure paths (the APNs URL contains the token).
 #[tokio::test]
 async fn logs_never_contain_tokens_or_endpoints() {
@@ -681,6 +910,10 @@ async fn logs_never_contain_tokens_or_endpoints() {
     let h = harness().await;
     let endpoint = h.endpoint("apns", APNS_TOKEN).await;
     let fcm_endpoint = h.endpoint("fcm", FCM_TOKEN).await;
+    let revocable = h.subscription("apns", APNS_TOKEN).await;
+    let revoke_secret = revocable["revoke_secret"].as_str().unwrap();
+    h.revoke(revocable["endpoint"].as_str().unwrap(), Some(revoke_secret))
+        .await;
     h.push(&h.server, &endpoint, "normal", &[1; 10]).await;
     h.apns
         .reply(500, json!({ "reason": "InternalServerError" }), None);
@@ -690,8 +923,13 @@ async fn logs_never_contain_tokens_or_endpoints() {
 
     let text = String::from_utf8(logs.0.lock().unwrap().clone()).unwrap();
     assert!(text.contains("APNs error"), "logs not captured:\n{text}");
-    let opaque = endpoint.rsplit('/').next().unwrap();
-    for secret in [APNS_TOKEN, FCM_TOKEN, opaque, &APNS_TOKEN[..16]] {
+    for secret in [
+        APNS_TOKEN,
+        FCM_TOKEN,
+        opaque(&endpoint),
+        &APNS_TOKEN[..16],
+        revoke_secret,
+    ] {
         assert!(!text.contains(secret), "found in logs: {secret}");
     }
 }

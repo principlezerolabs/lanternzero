@@ -13,8 +13,13 @@ pub struct Config {
     /// This gateway's public origin, for example `https://push.example.app`.
     /// Endpoints are built on it, and VAPID tokens must name it as `aud`.
     pub public_origin: String,
-    /// Holds the gateway's endpoint-sealing key, created on first start.
+    /// Holds the endpoint-sealing keys (created on first start) and the
+    /// revocation list.
     pub data_dir: PathBuf,
+    /// How long a new subscription lasts. Wallets renew before it ends
+    /// (spec §4.1); a revocation is kept this long. At most 365.
+    #[serde(default = "default_lifetime")]
+    pub endpoint_lifetime_days: u64,
     /// The visible title of payment alerts. Apple and Google relay it, so it
     /// must say nothing about the payment (spec §5.4).
     #[serde(default = "default_alert_title")]
@@ -23,6 +28,10 @@ pub struct Config {
     pub fcm: Option<FcmConfig>,
     #[serde(default)]
     pub limits: LimitsConfig,
+}
+
+fn default_lifetime() -> u64 {
+    90
 }
 
 fn default_alert_title() -> String {
@@ -123,6 +132,8 @@ pub enum ConfigError {
     Origin,
     #[error("configure at least one of [apns] and [fcm]")]
     NoPlatform,
+    #[error("endpoint_lifetime_days must be 1 to 365")]
+    Lifetime,
 }
 
 impl Config {
@@ -148,6 +159,9 @@ impl Config {
         }
         if self.apns.is_none() && self.fcm.is_none() {
             return Err(ConfigError::NoPlatform);
+        }
+        if !(1..=crate::keys::MAX_LIFETIME_DAYS).contains(&self.endpoint_lifetime_days) {
+            return Err(ConfigError::Lifetime);
         }
         Ok(())
     }

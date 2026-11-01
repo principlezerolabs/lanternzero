@@ -1,4 +1,9 @@
 //! `lz-gateway <config.toml>` runs the push gateway.
+//!
+//! `lz-gateway rotate-key <config.toml> [--drop-old]` makes a new
+//! endpoint-sealing key, used from the gateway's next start. Old keys keep
+//! opening their endpoints until those expire; `--drop-old`, for a
+//! suspected leak, drops them now and so invalidates every endpoint.
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -12,9 +17,17 @@ async fn main() -> ExitCode {
         .with_env_filter(lz_gateway::log_filter("info"))
         .init();
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let [path] = args.as_slice() else {
-        tracing::error!("usage: lz-gateway <config.toml>");
-        return ExitCode::FAILURE;
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    let (path, rotate) = match args.as_slice() {
+        [path] => (*path, None),
+        ["rotate-key", path] => (*path, Some(false)),
+        ["rotate-key", path, "--drop-old"] => (*path, Some(true)),
+        _ => {
+            tracing::error!(
+                "usage: lz-gateway <config.toml> | lz-gateway rotate-key <config.toml> [--drop-old]"
+            );
+            return ExitCode::FAILURE;
+        }
     };
     let config = match Config::load(&PathBuf::from(path)) {
         Ok(c) => c,
@@ -23,6 +36,26 @@ async fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    if let Some(drop_old) = rotate {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        return match lz_gateway::keys::KeyRing::rotate(&config.data_dir, now, drop_old) {
+            Ok(id) => {
+                tracing::info!(
+                    key_id = id,
+                    drop_old,
+                    "new sealing key; restart the gateway to use it"
+                );
+                ExitCode::SUCCESS
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "rotation failed");
+                ExitCode::FAILURE
+            }
+        };
+    }
     let listen = config.listen;
     let state = match AppState::new(config) {
         Ok(s) => s,

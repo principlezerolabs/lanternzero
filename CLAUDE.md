@@ -5,7 +5,7 @@ bridge until Zcash's Tachyon upgrade changes how wallets find payments. Read
 `README.md` first for the user-facing description.
 
 **Status (2026-10-31): pre-alpha, phase 1 of 4: spec and prototype.** The
-draft protocol spec is `spec/v0.md` (rev 3.8); `crates/lz-proto` holds the
+draft protocol spec is `spec/v0.md` (rev 3.9); `crates/lz-proto` holds the
 shared protocol types; `server/` is a prototype (OHTTP gateway, devices,
 30-minute pings, chain follower, and the scanner with in-memory leases,
 events, hints, and long-poll). See `server/README.md` for what's missing.
@@ -64,7 +64,7 @@ same copy. Treat a violation as a bug, and test for it.
 | --- | --- |
 | `spec/` | URL format and HTTP API: registration, lease renewal, hint list, long-poll, webhooks. **Change the spec first**; code follows. Version it. |
 | `server/` | Chain follower, wake-up scheduler, scanner with RAM leases, hint list, long-poll and webhook endpoints, OHTTP gateway side |
-| `gateway/` | Reference push gateway (prototype): stateless sealed endpoints, subscriptions bound to one server's VAPID key, per-device rate limits, forwards to APNs/FCM |
+| `gateway/` | Reference push gateway (prototype): sealed, expiring, revocable endpoints; subscriptions bound to one server's VAPID key; per-device rate limits; forwards to APNs/FCM |
 | `crates/lz-proto/` | Shared protocol types from the spec: requests and responses, padding, tokens, event ids, replay window. Test vectors in `spec/vectors/` |
 | `client/` | Rust client core for wallets (OHTTP, registration, lease renewal, hint list, long-poll). No I/O: the host app sends the bytes |
 | `deploy/` | Docker Compose self-host kit: profiles `full` (Zebra, Zaino, server, Tor) and `byo-node` (server and Tor, pointed at an existing node), with hardening for spec §6.2. Plan in `deploy/DESIGN.md` |
@@ -99,8 +99,10 @@ same copy. Treat a violation as a bug, and test for it.
     serves merchant backends and tests.
   - **HTTP framework:** axum, with the OHTTP gateway as a tower layer in
     front of the API.
-  - **Gateway storage:** none. The device token rides encrypted inside the
-    endpoint URL; rate limits live in memory.
+  - **Gateway storage:** no device records. The device token rides
+    encrypted inside the endpoint URL; rate limits live in memory. On disk
+    are only the sealing keys and a revocation list of hashes that says
+    nothing about devices (revocation is required by spec §4.1, rev 3.9).
   - **Crates:** `ohttp` with the `rust-hpke` backend (never `nss`). CI must
     fail if `ohttp`'s `unsafe-print-secrets` feature is enabled. APNs via
     our own small HTTP/2 client (`a2` is unmaintained since 2024); FCM via
