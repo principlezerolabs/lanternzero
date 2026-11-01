@@ -23,6 +23,14 @@ This is the public, open-source repo (MIT OR Apache-2.0). Business and hosting d
     (IVK)** as a lease. The server trial-decrypts blocks and the mempool, then
     sends a per-payment push plus a **hint list** (heights to scan first).
     Accept a full viewing key only when the user explicitly wants spend alerts.
+- **Where the value is.** Wallets can schedule their own background sync
+  (WorkManager on Android, `BGAppRefreshTask` on iOS), and that comes close
+  to our keyless ping, especially on Android. What apps can't do alone:
+  instant payment alerts from opt-in scanning, hints, live updates while
+  open, and cover. Default-mode users are the crowd that hides who has
+  lent a key (invariant 4), so default mode matters even where its pings
+  add little. Wallets should keep their own background sync and treat our
+  ping as one more wake source.
 - **Why 30 minutes:** Apple says to send no more than 2–3 background pushes an
   hour. A ping every block exceeds that. Mainnet blocks are 75 s now and 25 s
   after NU7 (around 5 Nov 2026), so expect about 72 blocks per wake.
@@ -128,8 +136,15 @@ same copy. Treat a violation as a bug, and test for it.
 3. Build the reference push gateway. It binds each subscription to one
    server's VAPID key and rate-limits per device, with no admission list
    (spec §5.3, decided in issue #6), so self-hosted servers get wake-ups.
-4. Measure: iOS wake delivery, the time to scan about 72 blocks on a phone,
-   and Zaino's disk usage on a synced mainnet node.
+4. Measure: the time to scan about 72 blocks on a phone, Zaino's disk usage
+   on a synced mainnet node, and wake delivery against what wallets can
+   already schedule themselves, on the same devices over several days:
+   - iOS: silent pushes vs `BGAppRefreshTask`, for apps opened daily and
+     rarely, and in Low Power Mode;
+   - Android: normal-priority FCM vs WorkManager periodic work, in Doze and
+     across App Standby buckets.
+   If our pings don't wake phones more reliably than the OS does, say so
+   in the README and keep the wake-up channel only as cover (below).
 5. Self-host packaging (`deploy/DESIGN.md`): `lz-server init` and
    `lz-server doctor`, the Compose kit with its two profiles and §6.2
    hardening, signed images pinned by digest, then the Claude skill.

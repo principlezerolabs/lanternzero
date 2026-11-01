@@ -23,6 +23,11 @@ offers two modes:
   to scan first. The operator can see your incoming payments while the lease
   is active, so this mode is off unless you turn it on.
 
+Wallets should keep their own background sync; wake-ups are one more wake
+source on top of it. Default mode also protects people who turn on scanning:
+because every user gets the same pings and sends the same padded requests,
+nobody watching can tell who has lent a key.
+
 All client requests travel over [Oblivious HTTP](https://www.rfc-editor.org/rfc/rfc9458)
 through an independent relay, so the server never sees your IP address.
 
