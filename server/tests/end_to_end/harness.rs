@@ -129,17 +129,25 @@ impl Harness {
 
     /// Encapsulates an already-encoded inner request and returns the reply.
     pub(crate) async fn send_raw(&self, inner: &[u8]) -> Reply {
+        self.send_raw_with_headers(inner, &[]).await
+    }
+
+    /// Like `send_raw`, with extra outer headers, such as those a relay
+    /// adds (spec §3.1: the server ignores them).
+    pub(crate) async fn send_raw_with_headers(
+        &self,
+        inner: &[u8],
+        outer_headers: &[(&str, &str)],
+    ) -> Reply {
         let keys = self.key_config().await;
         let client = ohttp::ClientRequest::from_encoded_config_list(&keys).unwrap();
         let (enc, ctx) = client.encapsulate(inner).unwrap();
-        let resp = self
-            .outer(
-                Request::post(gateway::GATEWAY_PATH)
-                    .header("content-type", "message/ohttp-req")
-                    .body(Body::from(enc))
-                    .unwrap(),
-            )
-            .await;
+        let mut req =
+            Request::post(gateway::GATEWAY_PATH).header("content-type", "message/ohttp-req");
+        for (name, value) in outer_headers {
+            req = req.header(*name, *value);
+        }
+        let resp = self.outer(req.body(Body::from(enc)).unwrap()).await;
         assert_eq!(resp.status(), StatusCode::OK, "outer status");
         let enc_resp = axum::body::to_bytes(resp.into_body(), 1 << 16)
             .await

@@ -347,6 +347,51 @@ async fn rate_limits_return_429_with_retry_after_inside_ohttp() {
     assert!((1..=60).contains(&secs));
 }
 
+/// Spec §3.1: servers ignore outer headers other than `Content-Type` and
+/// framing, and never log them. These are the headers relays were seen to
+/// add (Oblivious Network's `Region-*` and `Connection-Status`, 2026-11-01)
+/// or commonly add (client addresses).
+#[tokio::test]
+async fn relay_added_outer_headers_are_ignored_and_not_logged() {
+    let logs = global_logs();
+    let h = harness(true);
+    let added = [
+        ("x-forwarded-for", "203.0.113.77"),
+        ("forwarded", "for=203.0.113.77"),
+        ("cf-connecting-ip", "203.0.113.77"),
+        ("region-ingress", "zq9-ingress"),
+        ("region-egress", "zq9-egress"),
+        ("connection-status", "new"),
+        ("user-agent", "relay-probe-ua-7f3"),
+    ];
+    let date = SystemTime::now();
+    let plain = h
+        .send_raw(&h.inner("POST", HOST, "/v0/info", None, date, None))
+        .await;
+    let relayed = h
+        .send_raw_with_headers(&h.inner("POST", HOST, "/v0/info", None, date, None), &added)
+        .await;
+    assert_eq!(relayed.status, 200);
+    assert_eq!(relayed.padded_len, RESPONSE_SIZE);
+    assert_eq!(
+        relayed.json, plain.json,
+        "outer headers changed the response"
+    );
+
+    let text = String::from_utf8(logs.snapshot()).unwrap();
+    for needle in [
+        "203.0.113.77",
+        "zq9-ingress",
+        "zq9-egress",
+        "relay-probe-ua-7f3",
+    ] {
+        assert!(
+            !text.contains(needle),
+            "outer header value {needle} found in logs"
+        );
+    }
+}
+
 #[tokio::test]
 async fn gateway_requires_the_ohttp_media_type() {
     let h = harness(false);
