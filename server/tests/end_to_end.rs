@@ -6,6 +6,8 @@ mod common;
 
 // Integration-test submodules live under `tests/end_to_end/`; `#[path]` is
 // required because the crate root is this file, not that directory.
+#[path = "end_to_end/client.rs"]
+mod client;
 #[path = "end_to_end/harness.rs"]
 mod harness;
 #[path = "end_to_end/protocol.rs"]

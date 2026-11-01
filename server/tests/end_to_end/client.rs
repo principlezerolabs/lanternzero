@@ -1,0 +1,234 @@
+//! The wallet client core (`lz-client`) against the real server, through
+//! the real OHTTP gateway, the way a wallet SDK drives it. The test plays
+//! the app's networking and the relay.
+
+use std::sync::Arc;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use axum::body::Body;
+use axum::http::{Request, StatusCode};
+use lz_client::{
+    Client, ClientState, Error, HttpRequest, HttpResponse, KeyConfig, PushReceiver, Transport,
+};
+use lz_proto::api::{DeviceRegistration, EventStatus, Hint, PingType};
+use lz_proto::lease::{AlertMode, LeaseRequest, Network, ViewingKey};
+use lz_proto::token::TokenHash;
+use lz_proto::url::ConnectionUrl;
+use lz_server::config::LimitsConfig;
+use lz_server::gateway::GATEWAY_PATH;
+
+use super::harness::{BASE, HOST, Harness, harness_full, receiver};
+use super::scanning::{eventually, sync_tip};
+use crate::common::fake_lwd;
+use crate::common::wallet::{Wallet, action, block, tx};
+
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64
+}
+
+/// Plays the relay: forwards the encapsulated request to the gateway.
+async fn relay(h: &Harness, req: &HttpRequest) -> (u16, Vec<u8>) {
+    assert_eq!(req.url, format!("https://{HOST}{GATEWAY_PATH}"));
+    let mut b = Request::post(GATEWAY_PATH);
+    for (name, value) in &req.headers {
+        b = b.header(*name, value.as_str());
+    }
+    let resp = h.outer(b.body(Body::from(req.body.clone())).unwrap()).await;
+    let status = resp.status().as_u16();
+    let body = axum::body::to_bytes(resp.into_body(), 1 << 16)
+        .await
+        .unwrap()
+        .to_vec();
+    (status, body)
+}
+
+fn reply(r: &(u16, Vec<u8>)) -> HttpResponse<'_> {
+    HttpResponse {
+        status: r.0,
+        retry_after: None,
+        body: &r.1,
+    }
+}
+
+fn connection(h: &Harness) -> ConnectionUrl {
+    ConnectionUrl::parse(&format!("lanternzero://{HOST}{BASE}#{}", h.token)).unwrap()
+}
+
+#[tokio::test]
+async fn a_wallet_session_through_the_client_core() {
+    let chain = fake_lwd::genesis();
+    chain.lock().unwrap().build(1, 100, 1);
+    let url = fake_lwd::serve(chain.clone()).await;
+    let h = harness_full(true, LimitsConfig::default(), Some(url));
+    sync_tip(&h).await;
+    let mut sizes = Vec::new();
+
+    // The key configuration, as fetched through two relays.
+    let config = KeyConfig::from_two_relays(&h.key_config().await, &h.key_config().await).unwrap();
+    let mut c = Client::new(
+        connection(&h),
+        Network::Main,
+        Transport::Ohttp(config.clone()),
+        ClientState::default(),
+    )
+    .unwrap();
+
+    let p = c.info(now_ms()).unwrap();
+    sizes.push(p.request().body.len());
+    let r = relay(&h, p.request()).await;
+    let info = c.finish_info(p, reply(&r)).unwrap();
+    assert_eq!(info.info.vapid_public_key, h.state.vapid.public_b64);
+    assert!(!info.vapid_key_changed);
+
+    // Register with an endpoint from the vendor's gateway, then remove it.
+    let device = PushReceiver::generate().unwrap();
+    let p = c
+        .register(
+            now_ms(),
+            "https://push.example-wallet.app/wp/abc",
+            device.push_keys(),
+        )
+        .unwrap();
+    sizes.push(p.request().body.len());
+    let r = relay(&h, p.request()).await;
+    let removed = c.finish_register(p, reply(&r)).unwrap();
+    let p = c.unregister(now_ms()).unwrap();
+    let r = relay(&h, p.request()).await;
+    c.finish_unregister(p, reply(&r)).unwrap();
+    assert_eq!(c.state().device_id, None);
+
+    // Another copy of the app still holding that device id is told so.
+    let mut stale = Client::new(
+        connection(&h),
+        Network::Main,
+        Transport::Ohttp(config.clone()),
+        ClientState {
+            device_id: Some(removed),
+            ..ClientState::default()
+        },
+    )
+    .unwrap();
+    let p = stale.wake(now_ms(), None).unwrap();
+    let r = relay(&h, p.request()).await;
+    assert_eq!(stale.finish_wake(p, reply(&r)), Err(Error::UnknownDevice));
+    assert_eq!(stale.state().device_id, None);
+
+    // A device whose pushes reach a local receiver. Registration over the
+    // API needs an https endpoint, so it goes into the store directly.
+    let (endpoint, pushes) = receiver(StatusCode::CREATED).await;
+    let account = h
+        .state
+        .store
+        .authenticate(&TokenHash::of_text(&h.token))
+        .unwrap();
+    let device_id = h
+        .state
+        .store
+        .register_device(
+            account,
+            &DeviceRegistration {
+                seq: 1,
+                endpoint,
+                keys: device.push_keys(),
+            },
+            10,
+        )
+        .unwrap();
+    let mut state = c.state().clone();
+    state.device_id = Some(device_id);
+    let mut c = Client::new(
+        connection(&h),
+        Network::Main,
+        Transport::Ohttp(config),
+        state,
+    )
+    .unwrap();
+
+    // The scheduled ping, opened on the device.
+    lz_server::push::wake_round(&h.state, Duration::ZERO).await;
+    eventually(|| !pushes.0.lock().unwrap().is_empty()).await;
+    let (_, body) = pushes.0.lock().unwrap().pop().unwrap();
+    let ping = device.open_ping(&body).unwrap();
+    assert_eq!(ping.t, PingType::Wake);
+    assert!(ping.events.is_empty());
+
+    // Opt in: a lease on the wake.
+    let alice = Wallet::new(1);
+    let lease = || LeaseRequest {
+        keys: vec![ViewingKey::new(alice.uivk_main())],
+        from_height: 95,
+        duration_secs: 604_800,
+        spend_alerts: false,
+        alert_mode: AlertMode::Instant,
+    };
+    let p = c.wake(now_ms(), None).unwrap();
+    sizes.push(p.request().body.len());
+    let p = c.wake(now_ms(), Some(lease())).unwrap();
+    sizes.push(p.request().body.len());
+    let r = relay(&h, p.request()).await;
+    let w = c.finish_wake(p, reply(&r)).unwrap();
+    assert_eq!(w.tip, 100);
+    assert!(w.lease.active);
+    assert!(w.events.is_empty());
+
+    // The long-poll is held until a payment lands in a new block.
+    let p = c.poll(now_ms()).unwrap();
+    sizes.push(p.request().body.len());
+    let held = {
+        let h = h.fork();
+        let req = p.request().clone();
+        tokio::spawn(async move { relay(&h, &req).await })
+    };
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(!held.is_finished(), "a poll returned without a release");
+    let b = block(
+        101,
+        vec![tx(
+            0xA1,
+            vec![],
+            vec![action(&alice.orchard, 7, false)],
+            vec![],
+        )],
+    );
+    lz_server::scanner::scan_block(&h.state, Arc::new(b)).await;
+    let r = held.await.unwrap();
+    let out = c.finish_poll(p, reply(&r)).unwrap();
+    assert_eq!(out.events.len(), 1);
+    let event = out.events[0].clone();
+    assert_eq!(event.status, EventStatus::Mined);
+    assert_eq!(event.height, Some(101));
+    assert!(event.compact_tx.is_some());
+
+    // The instant payment push, opened on the device.
+    eventually(|| !pushes.0.lock().unwrap().is_empty()).await;
+    let (_, body) = pushes.0.lock().unwrap().pop().unwrap();
+    let ping = device.open_ping(&body).unwrap();
+    assert_eq!(ping.t, PingType::Payment);
+    assert_eq!(ping.events[0].id, event.id);
+
+    // The next wake repeats the event (not reported again) with its hint;
+    // the acknowledgement rides on the one after and clears both.
+    let p = c.wake(now_ms(), Some(lease())).unwrap();
+    let r = relay(&h, p.request()).await;
+    let w = c.finish_wake(p, reply(&r)).unwrap();
+    assert!(w.events.is_empty());
+    assert_eq!(
+        w.hints,
+        [Hint {
+            start: 101,
+            end: 102
+        }]
+    );
+    assert!(c.ack(&event));
+    let p = c.wake(now_ms(), Some(lease())).unwrap();
+    let r = relay(&h, p.request()).await;
+    let w = c.finish_wake(p, reply(&r)).unwrap();
+    assert!(w.hints.is_empty());
+    assert_eq!(c.pending_acks(), 0);
+
+    // Invariant 4: every request looked the same to the relay.
+    assert!(sizes.iter().all(|&s| s == sizes[0]), "{sizes:?}");
+}

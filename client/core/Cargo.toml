@@ -1,0 +1,38 @@
+[package]
+name = "lz-client"
+version = "0.0.1"
+description = "Lantern Zero client core for wallets: OHTTP requests, registration, wake, long-poll, push decryption. No I/O."
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+# Wallet SDKs embed this crate: no tokio, no TLS, no Zcash wallet crates
+# (CONTRIBUTING.md). The RFC 8291 crates (p256, aes-gcm, hkdf, sha2 0.11)
+# are the versions `ohttp`'s rust-hpke backend already brings in, so ping
+# decryption adds no second copy. They need Rust 1.87: older P-256 crates
+# use a crypto-bigint with timing leaks (RUSTSEC-2026-0387).
+[dependencies]
+lz-proto = { path = "../../crates/lz-proto" }
+aes-gcm = "0.11"
+base64 = "0.22"
+bhttp = "0.8"
+getrandom = "0.3"
+hkdf = "0.13"
+httpdate = "1"
+ohttp = { version = "0.8", default-features = false, features = ["client", "rust-hpke"] }
+p256 = { version = "0.14", features = ["ecdh"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.11"
+thiserror = "2"
+zeroize = "1.8"
+
+[dev-dependencies]
+# A stand-in OHTTP gateway for the unit tests. The end-to-end tests against
+# the real server live in server/tests, which needs Rust 1.89.
+ohttp = { version = "0.8", default-features = false, features = ["client", "server", "rust-hpke"] }
+
+[lints]
+workspace = true

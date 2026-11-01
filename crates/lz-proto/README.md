@@ -13,7 +13,8 @@ The parts of the [v0 spec](../../spec/v0.md) that servers and wallets share:
 | `lease` | §4.2 | Viewing-key leases: validation and duration clamping |
 
 Wallet SDKs embed this crate, so it has no I/O, no async runtime, no TLS
-stack, and no Zcash crates, and it builds on Rust 1.86. CI enforces this.
+stack, and no Zcash crates, and it builds on Rust 1.89 (librustzcash's
+minimum). CI enforces this.
 
 Account tokens and viewing keys never appear in `Debug` output and are zeroed
 when dropped. Tests check both.

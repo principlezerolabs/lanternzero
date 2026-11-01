@@ -1,9 +1,64 @@
 # client
 
-Rust client core for wallets: registration over Oblivious HTTP, lease
-renewal, hint list, and long-poll.
+Rust client core for wallets (`client/core`, crate `lz-client`).
 
-It does no networking itself. It builds and opens OHTTP messages, and the
-host app sends them with its own HTTP stack (URLSession, OkHttp). Wallet SDKs
-compile it into their existing native library and expose it through their
-own FFI, so the app never links a second Rust library.
+**Status: prototype.** Tested against a stand-in OHTTP gateway and, end to
+end, against the real server (`server/tests/end_to_end/client.rs`). Not yet
+embedded in a wallet SDK.
+
+It does no networking itself. Each call builds a request as bytes and
+returns a pending value; the app sends the bytes with its own HTTP stack
+(URLSession, OkHttp) and hands the response back:
+
+```rust
+let pending = client.wake(now_ms, lease)?;        // build
+let (status, body) = app_send(pending.request()); // the app's networking
+let outcome = client.finish_wake(pending, HttpResponse { status, retry_after: None, body: &body })?;
+```
+
+Wallet SDKs compile it into their existing native library and expose it
+through their own FFI, so the app never links a second Rust library. It
+pulls in no async runtime, no TLS stack, and no Zcash wallet crates, and it
+builds on Rust 1.89, librustzcash's own minimum.
+
+## What it covers
+
+| Spec | |
+| --- | --- |
+| §3.1–3.3 | OHTTP encapsulation of Binary HTTP padded to 4096 bytes; responses that aren't exactly 4096 bytes are refused. `.onion` servers over Tor instead (`Transport::Onion`) |
+| §3.2 | `KeyConfig::from_two_relays`: refuses configurations that differ between relays; `info` must name the same one |
+| §3.4 | `Date` header and time-based `seq`, with `stale-seq` recovery: on `Error::StaleSeq`, build the request again and send it once more |
+| §4.1 | Device registration and removal; `Error::UnknownDevice` clears the device so the app registers again |
+| §4.2 | `wake`, with or without a lease. Leases are checked first: no full viewing key without spend alerts |
+| §4.3 | The long-poll: `poll` uses a 25 s `wait`, or `wait: 0` when the last response said more events are waiting |
+| §4.4 | Acknowledgements ride on the next request and stay queued until one succeeds. Only `mined` events are acknowledged |
+| §4.7 | `info`: network and version checks; reports when the server's VAPID key changed |
+| §5 | `PushReceiver`: the device's RFC 8291 keys, and opening a fixed-size ping (checked against the RFC 8291 example) |
+
+Events that every `wake` repeats are reported to the app once, and again
+only when they change.
+
+## What the app does
+
+- Keep the connection URL (it holds the account token) and the
+  `PushReceiver` secrets in the keychain, and persist `ClientState` (no
+  secrets) after each call.
+- Fetch the server's key configuration through two different relays, and
+  send each request to one of the vendor's relays, rotating among them.
+- Send exactly one `wake` per wake and long-poll while in the foreground,
+  in both modes (spec §3.3).
+- Get the user's consent before the first lease (spec §6.3), and use hints
+  only to reorder its normal sync.
+- Subscribe at the vendor's push gateway with the server's
+  `vapid_public_key`, renew before the subscription expires, and revoke it
+  when the user removes the server. The reference gateway's wallet API is
+  in [`gateway/README.md`](../gateway/README.md).
+
+## Not yet
+
+- Token rotation, account deletion, and webhooks: the server doesn't have
+  them yet either.
+- An optional `reqwest` feature that sends requests itself, for merchant
+  backends.
+- Choosing relays. Relay addressing differs between relay software
+  (spec §9).

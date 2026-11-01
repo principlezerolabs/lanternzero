@@ -35,9 +35,9 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        # 1.86 is the minimum for client-side crates (see CONTRIBUTING.md);
-        # 1.89 is the server's.
-        toolchain: [stable, "1.86", "1.89"]
+        # 1.89 is the minimum for every crate, the same as librustzcash's
+        # (see CONTRIBUTING.md).
+        toolchain: [stable, "1.89"]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -46,11 +46,8 @@ jobs:
       # Explicit +toolchain overrides rust-toolchain.toml (fmt/clippy pin).
       - if: matrix.toolchain == 'stable'
         run: cargo +stable test --workspace --locked
-      # The 1.86 minimum covers only client-side crates (CONTRIBUTING.md).
-      - if: matrix.toolchain == '1.86'
-        run: cargo +1.86 test -p lz-proto --locked
       - if: matrix.toolchain == '1.89'
-        run: cargo +1.89 test -p lz-server -p lz-gateway --locked
+        run: cargo +1.89 test --workspace --locked
 
   # Integration tests against real Zebra and Zaino on a private regtest
   # chain (deploy/regtest).

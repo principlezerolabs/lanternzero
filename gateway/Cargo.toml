@@ -3,8 +3,7 @@ name = "lz-gateway"
 version = "0.0.1"
 description = "Lantern Zero reference push gateway: Web Push in, APNs and FCM out"
 edition.workspace = true
-# Not embedded in wallets; same minimum as the server.
-rust-version = "1.89"
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 publish = false

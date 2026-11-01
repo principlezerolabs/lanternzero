@@ -67,7 +67,7 @@ Put TLS in front of it (a reverse proxy), and point an OHTTP relay at
   and checked against the RFC 8291 test vector. Existing Web Push crates
   depend on a `crypto-bigint` with timing leaks (RUSTSEC-2026-0387).
 - **Minimum Rust 1.89**, because `zcash_client_backend` 0.25 (the first
-  release with Ironwood) needs it. The server is not embedded in wallets,
-  so the 1.86 rule doesn't apply to it.
+  release with Ironwood) needs it. The whole workspace uses the same
+  minimum.
 - **Chain source.** Without a `[chain]` section, `tip` stays `0`. Run Zaino
   on the same host or private network (`http://`), or use `https://`.

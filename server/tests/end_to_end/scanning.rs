@@ -60,7 +60,7 @@ async fn scanning(height: u64) -> Scanning {
 }
 
 /// Runs the chain follower until it has caught up with the fake.
-async fn sync_tip(h: &Harness) {
+pub(crate) async fn sync_tip(h: &Harness) {
     let source = h.state.chain_source.clone().unwrap();
     let mut f = lz_server::chain::Follower::new(h.state.chain.clone(), source);
     while f.step().await.unwrap() != lz_server::chain::Step::CaughtUp {}
@@ -112,7 +112,7 @@ fn lease_json(w: &Wallet, from_height: u64, alert_mode: &str) -> Value {
 }
 
 /// Waits up to 5 s for `cond`.
-async fn eventually(mut cond: impl FnMut() -> bool) {
+pub(crate) async fn eventually(mut cond: impl FnMut() -> bool) {
     for _ in 0..100 {
         if cond() {
             return;

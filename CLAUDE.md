@@ -4,11 +4,12 @@ Lantern Zero gives Zcash wallets faster sync and payment notifications. It is a
 bridge until Zcash's Tachyon upgrade changes how wallets find payments. Read
 `README.md` first for the user-facing description.
 
-**Status (2026-10-31): pre-alpha, phase 1 of 4: spec and prototype.** The
+**Status (2026-11-01): pre-alpha, phase 1 of 4: spec and prototype.** The
 draft protocol spec is `spec/v0.md` (rev 3.9); `crates/lz-proto` holds the
 shared protocol types; `server/` is a prototype (OHTTP gateway, devices,
 30-minute pings, chain follower, and the scanner with in-memory leases,
-events, hints, and long-poll). See `server/README.md` for what's missing.
+events, hints, and long-poll); `gateway/` and `client/core` are
+prototypes too. Each README says what's missing.
 This is the public, open-source repo (MIT OR Apache-2.0). Business and hosting details live in the private
 `principlezerolabs/lanternzero-ops` repo; never put them here.
 
@@ -66,7 +67,7 @@ same copy. Treat a violation as a bug, and test for it.
 | `server/` | Chain follower, wake-up scheduler, scanner with RAM leases, hint list, long-poll and webhook endpoints, OHTTP gateway side |
 | `gateway/` | Reference push gateway (prototype): sealed, expiring, revocable endpoints; subscriptions bound to one server's VAPID key; per-device rate limits; forwards to APNs/FCM |
 | `crates/lz-proto/` | Shared protocol types from the spec: requests and responses, padding, tokens, event ids, replay window. Test vectors in `spec/vectors/` |
-| `client/` | Rust client core for wallets (OHTTP, registration, lease renewal, hint list, long-poll). No I/O: the host app sends the bytes |
+| `client/` | Rust client core for wallets (`client/core`, prototype): OHTTP requests, registration, wake and leases, long-poll, acknowledgements, ping decryption. No I/O: the host app sends the bytes |
 | `deploy/` | Docker Compose self-host kit: profiles `full` (Zebra, Zaino, server, Tor) and `byo-node` (server and Tor, pointed at an existing node), with hardening for spec §6.2. Plan in `deploy/DESIGN.md` |
 | `skill/` | Claude skill that guides and troubleshoots self-hosting. The Compose files and `lz-server init` do the installing; the skill runs `lz-server doctor` and never improvises configuration. |
 
@@ -85,9 +86,12 @@ same copy. Treat a violation as a bug, and test for it.
 - **Decided (2026-10-31):**
   - **Workspace:** one Cargo workspace (`crates/lz-proto`, `server`,
     `gateway`, `client/core`). Client-side crates (`lz-proto`, client core)
-    must not depend on `zcash_client_backend`, tokio, or a TLS stack, and
-    must build on Rust 1.86, so wallet SDKs with pinned librustzcash
-    versions can embed them.
+    must not depend on `zcash_client_backend`, tokio, or a TLS stack.
+  - **Minimum Rust (2026-11-01):** 1.89 for every crate, the same as
+    librustzcash (`zcash_client_backend` 0.25, the first with Ironwood,
+    needs it), so wallets embedding our client-side crates need nothing
+    newer. It was 1.86; P-256 without the RUSTSEC-2026-0387 timing leaks
+    needs 1.87, and the client core needs P-256 to decrypt pings.
   - **Bindings:** none of our own at first. Wallet SDKs (ZODL's use
     hand-written JNI on Android and `cbindgen` on iOS, in one native
     library) compile the client crate into that library and expose it

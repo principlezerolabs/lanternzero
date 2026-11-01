@@ -3,9 +3,7 @@ name = "lz-server"
 version = "0.0.1"
 description = "Lantern Zero server: OHTTP gateway, v0 API, wake-up scheduler"
 edition.workspace = true
-# Not embedded in wallets, so not bound by the 1.86 minimum.
-# zcash_client_backend 0.25 (the first with Ironwood) needs 1.89.
-rust-version = "1.89"
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 publish = false
@@ -62,6 +60,8 @@ redjubjub = "0.9"
 sapling = { package = "sapling-crypto", version = "0.9", default-features = false, features = ["std", "test-dependencies"] }
 ohttp = { version = "0.8", default-features = false, features = ["client", "server", "rust-hpke"] }
 serde_json = "1"
+# The wallet client core, driven against the real server.
+lz-client = { path = "../client/core" }
 
 [lints]
 workspace = true

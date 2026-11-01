@@ -1,11 +1,13 @@
 [workspace]
 resolver = "3"
-members = ["crates/lz-proto", "server", "gateway"]
+members = ["crates/lz-proto", "client/core", "server", "gateway"]
 
 [workspace.package]
 edition = "2024"
-# Client-side crates must build on this version so wallet SDKs can embed them.
-rust-version = "1.86"
+# Every crate builds on this version. It matches librustzcash's own minimum
+# (zcash_client_backend 0.25, the first with Ironwood, needs 1.89), so
+# wallet SDKs that embed our client-side crates need nothing newer.
+rust-version = "1.89"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/principlezerolabs/lanternzero"
 

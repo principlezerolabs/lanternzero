@@ -21,4 +21,4 @@ explain below why it doesn't apply.
 
 ## Testing
 
-<!-- What you ran: scripts/check.sh, cargo deny check, cargo +stable/+1.86/+1.89 tests, regtest if applicable. -->
+<!-- What you ran: scripts/check.sh, cargo deny check, cargo +stable/+1.89 tests, regtest if applicable. -->

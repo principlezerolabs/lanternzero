@@ -87,7 +87,8 @@ SDK's own pinned Zcash crates. So they:
 - do no I/O of their own; the host app sends the bytes;
 - must not depend on tokio, any TLS stack, or Zcash wallet crates
   (`zcash_client_backend`, `zcash_client_sqlite`);
-- must build on Rust **1.86**.
+- must build on Rust **1.89**, librustzcash's own minimum, so wallets
+  need no newer compiler for them.
 
 CI checks the dependency and Rust version rules; reviewers check the first.
 
@@ -124,13 +125,12 @@ one:
 ## Before you open a pull request
 
 Fmt and clippy use the pinned toolchain in [`rust-toolchain.toml`](rust-toolchain.toml).
-MSRV checks override it with `cargo +1.86` and `cargo +1.89`.
+The minimum-Rust check overrides it with `cargo +1.89`.
 
 ```sh
 scripts/check.sh                # fmt, clippy, privacy guards, typos; deny/machete if installed
 cargo +stable test --workspace  # CI stable matrix leg (+stable, not the fmt/clippy pin)
-cargo +1.86 test -p lz-proto      # client-side crates' minimum Rust
-cargo +1.89 test -p lz-server -p lz-gateway   # server and gateway minimum Rust
+cargo +1.89 test --workspace     # minimum Rust, for every crate
 cargo deny check                  # required; also run by scripts/check.sh when cargo-deny is installed
 ```
 
