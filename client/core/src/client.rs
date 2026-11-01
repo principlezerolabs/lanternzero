@@ -195,7 +195,7 @@ impl Client {
         &self.url
     }
 
-    /// Replaces the key configuration after a new two-relay check.
+    /// Replaces the key configuration after fetching it again (spec §3.2).
     pub fn set_key_config(&mut self, config: KeyConfig) {
         if let Transport::Ohttp(c) = &mut self.transport {
             *c = config;

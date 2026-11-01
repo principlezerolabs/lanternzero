@@ -26,9 +26,13 @@ pub const OHTTP_RESPONSE_TYPE: &str = "message/ohttp-res";
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum KeyConfigError {
-    /// The two relays served different configurations: the server may be
-    /// tagging this user (spec §3.2). Don't use either.
-    #[error("the two relays returned different key configurations")]
+    /// The two sources served different configurations: the server may
+    /// be tagging this user, or rotating while one source is behind
+    /// (spec §3.2). If one copy matches the configuration in use, keep
+    /// using it and check again after the source's refresh interval (at
+    /// most 24 hours); if they still differ, stop using the server and
+    /// tell the user.
+    #[error("the two sources returned different key configurations")]
     Mismatch,
     #[error("not a valid OHTTP key configuration")]
     Invalid,
@@ -51,16 +55,21 @@ impl std::fmt::Debug for KeyConfig {
 }
 
 impl KeyConfig {
-    /// Accepts the configuration only if the copies fetched through two
-    /// different relays are identical (spec §3.2).
-    pub fn from_two_relays(first: &[u8], second: &[u8]) -> Result<Self, KeyConfigError> {
+    /// Accepts the configuration only if the copies from two sources are
+    /// identical (spec §3.2). Each source must hide the device's IP
+    /// address from the server: a relay that can carry the fetch, a
+    /// mirror, or Tor. Never fetch it from the server directly, and use
+    /// sources run by different operators, neither of them the server's.
+    pub fn from_two_sources(first: &[u8], second: &[u8]) -> Result<Self, KeyConfigError> {
         if first != second {
             return Err(KeyConfigError::Mismatch);
         }
         Self::from_cache(first)
     }
 
-    /// A configuration the app cached after an earlier two-relay check.
+    /// A configuration the app cached after an earlier check, or one from
+    /// a single source that hides the IP address, where no second source
+    /// is available (spec §3.2 makes the second source a SHOULD).
     pub fn from_cache(encoded: &[u8]) -> Result<Self, KeyConfigError> {
         ohttp::ClientRequest::from_encoded_config_list(encoded)
             .map_err(|_| KeyConfigError::Invalid)?;

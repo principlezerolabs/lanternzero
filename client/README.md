@@ -26,7 +26,7 @@ builds on Rust 1.89, librustzcash's own minimum.
 | Spec | |
 | --- | --- |
 | §3.1–3.3 | OHTTP encapsulation of Binary HTTP padded to 4096 bytes; responses that aren't exactly 4096 bytes are refused. `.onion` servers over Tor instead (`Transport::Onion`) |
-| §3.2 | `KeyConfig::from_two_relays`: refuses configurations that differ between relays; `info` must name the same one (`Error::KeyConfigChanged`). After a rotation, `Error::KeyConfigRejected` (RFC 9458's `ohttp-key` problem) means fetch the configuration again, `set_key_config`, and build the request again; do the same after an `Error::Relay` if the configuration is more than an hour old |
+| §3.2 | `KeyConfig::from_two_sources`: refuses configurations that differ between two sources that hide the device's IP (relays that can carry the fetch, mirrors, or Tor; `from_cache` for one source or the app's cache); `info` must name the same one (`Error::KeyConfigChanged`). After a rotation, `Error::KeyConfigRejected` (RFC 9458's `ohttp-key` problem) means fetch the configuration again, `set_key_config`, and build the request again; do the same after an `Error::Relay` if the configuration is more than an hour old |
 | §3.4 | `Date` header and time-based `seq`, with `stale-seq` recovery: on `Error::StaleSeq`, build the request again and send it once more. A device clock more than 60 s off is corrected from the server's `bad-date` answer (`ClientState::clock_offset_ms`): on `Error::ClockCorrected`, do the same |
 | §4.1 | Device registration and removal. Registration names the VAPID key `info` last reported (call `info` first); `Error::UnknownVapidKey` means read `info` again and resubscribe. When `info` reports a new key, register a subscription bound to it, then delete the old record with `unregister_device`. `Error::UnknownDevice` clears the device so the app registers again |
 | §4.2 | `wake`, with or without a lease. Leases are checked first: no full viewing key without spend alerts |
@@ -44,8 +44,12 @@ only when they change.
 - Keep the connection URL (it holds the account token) and the
   `PushReceiver` secrets in the keychain, and persist `ClientState` (no
   secrets) after each call.
-- Fetch the server's key configuration through two different relays, and
-  send each request to one of the vendor's relays, rotating among them.
+- Fetch the server's key configuration from two sources that hide the
+  device's IP address and are run by different operators, never from the
+  server directly (spec §3.2). On `KeyConfigError::Mismatch`, keep using
+  the configuration in use if one copy matches it, and check again within
+  24 hours.
+- Send each request to one of the vendor's relays, rotating among them.
 - Send exactly one `wake` per wake and long-poll while in the foreground,
   in both modes (spec §3.3).
 - If the app forwards Rust `log` records (for example to logcat), cap the

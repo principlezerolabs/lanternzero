@@ -67,8 +67,8 @@ async fn a_wallet_session_through_the_client_core() {
     sync_tip(&h).await;
     let mut sizes = Vec::new();
 
-    // The key configuration, as fetched through two relays.
-    let config = KeyConfig::from_two_relays(&h.key_config().await, &h.key_config().await).unwrap();
+    // The key configuration, as fetched from two sources (spec §3.2).
+    let config = KeyConfig::from_two_sources(&h.key_config().await, &h.key_config().await).unwrap();
     let mut c = Client::new(
         connection(&h),
         Network::Main,
@@ -246,7 +246,7 @@ async fn token_rotation_and_account_deletion_through_the_client_core() {
     let url = fake_lwd::serve(chain.clone()).await;
     let h = harness_full(true, LimitsConfig::default(), Some(url));
     sync_tip(&h).await;
-    let config = KeyConfig::from_two_relays(&h.key_config().await, &h.key_config().await).unwrap();
+    let config = KeyConfig::from_two_sources(&h.key_config().await, &h.key_config().await).unwrap();
     let account = h
         .state
         .store
@@ -376,7 +376,7 @@ async fn vapid_rotation_keeps_devices_on_their_key_until_they_move() {
             10,
         )
         .unwrap();
-    let config = KeyConfig::from_two_relays(&h.key_config().await, &h.key_config().await).unwrap();
+    let config = KeyConfig::from_two_sources(&h.key_config().await, &h.key_config().await).unwrap();
     let mut c = Client::new(
         connection(&h),
         Network::Main,
@@ -534,7 +534,7 @@ async fn ohttp_key_rotation_through_the_client_core() {
     let dir = h.state.config.data_dir.clone();
     let fetch = |h: &Harness| {
         let h = h.fork();
-        async move { KeyConfig::from_two_relays(&h.key_config().await, &h.key_config().await) }
+        async move { KeyConfig::from_two_sources(&h.key_config().await, &h.key_config().await) }
     };
     let old = fetch(&h).await.unwrap();
     let mut c = Client::new(
@@ -596,7 +596,7 @@ async fn ohttp_key_rotation_through_the_client_core() {
 #[tokio::test]
 async fn a_wallet_with_a_slow_clock_corrects_it_from_the_server() {
     let h = harness(true);
-    let config = KeyConfig::from_two_relays(&h.key_config().await, &h.key_config().await).unwrap();
+    let config = KeyConfig::from_two_sources(&h.key_config().await, &h.key_config().await).unwrap();
     let mut c = Client::new(
         connection(&h),
         Network::Main,

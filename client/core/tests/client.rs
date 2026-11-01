@@ -56,7 +56,7 @@ impl Gateway {
     }
 
     fn key_config(&self) -> KeyConfig {
-        KeyConfig::from_two_relays(&self.keys, &self.keys).unwrap()
+        KeyConfig::from_two_sources(&self.keys, &self.keys).unwrap()
     }
 
     fn receive(&self, req: &HttpRequest) -> Seen {
@@ -532,11 +532,11 @@ fn refuses_responses_that_are_not_fixed_size_or_not_from_the_gateway() {
 }
 
 #[test]
-fn key_configs_must_match_across_relays() {
+fn key_configs_must_match_across_sources() {
     let a = Gateway::new(1);
     let b = Gateway::new(2);
     assert_eq!(
-        KeyConfig::from_two_relays(&a.keys, &b.keys).unwrap_err(),
+        KeyConfig::from_two_sources(&a.keys, &b.keys).unwrap_err(),
         KeyConfigError::Mismatch
     );
     assert_eq!(

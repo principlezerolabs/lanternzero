@@ -29,7 +29,8 @@
 //!
 //! What stays with the app: storing the connection URL and the
 //! [`PushReceiver`] secrets in the keychain, persisting [`ClientState`],
-//! fetching the key configuration through two relays, scheduling (one
+//! fetching the key configuration from sources that hide the device's IP
+//! address (spec §3.2), scheduling (one
 //! `wake` per wake; a long-poll while in the foreground), and consent
 //! (spec §6.3).
 
@@ -61,8 +62,8 @@ pub enum Error {
     Relay(u16),
     /// The server no longer accepts the OHTTP key configuration in use,
     /// for example a week after it rotated (spec §3.2). Fetch it again
-    /// through two relays ([`KeyConfig::from_two_relays`]),
-    /// [`Client::set_key_config`], and build the request again.
+    /// ([`KeyConfig::from_two_sources`]), [`Client::set_key_config`], and
+    /// build the request again.
     #[error("the server no longer accepts this OHTTP key configuration")]
     KeyConfigRejected,
     /// The response couldn't be decrypted, wasn't the fixed size, or wasn't
@@ -118,7 +119,7 @@ pub enum Error {
     #[error("server does not speak protocol v0")]
     UnsupportedVersion,
     /// `info` names a different OHTTP key configuration than the one in
-    /// use: fetch it again through two relays (spec §3.2).
+    /// use: fetch it again ([`KeyConfig::from_two_sources`], spec §3.2).
     #[error("server's OHTTP key configuration changed")]
     KeyConfigChanged,
     /// [`Transport::Onion`] is only for `.onion` servers.
