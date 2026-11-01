@@ -123,6 +123,17 @@ same copy. Treat a violation as a bug, and test for it.
     `gcp_auth` with `reqwest`; Web Push is our own small implementation on RustCrypto
     (`server/src/webpush.rs`), because the existing crates pull in a
     `crypto-bigint` with timing leaks.
+  - **No shared server/gateway crate yet (2026-11-01):** the server and
+    the gateway each keep their own `log_filter` and owner-only file
+    helpers (about 40 lines in all). Add a server-side shared crate only
+    when there is more to share; VAPID signing (`server/src/webpush.rs`)
+    and checking (`gateway/src/vapid.rs`) is the likely trigger. It
+    must never be a dependency of the client-side crates.
+  - **One server per data directory (2026-11-01):** the server keeps
+    devices, replay windows, and leases in its own memory, so it locks
+    `data_dir` at start. Scale up, not out, until the phase-1
+    measurements show where one server tops out; then revisit storage
+    (an embedded database instead of `state.json`) before anything else.
 - **Prior art worth reading:**
   - `samizdatproject/zeccheckout` (MIT): a UFVK scanner over compact blocks
     with mempool polling and signed webhooks.

@@ -77,8 +77,7 @@ lz-server <config.toml> rotate-ohttp --drop-old   # suspected leak
 
 No restart is needed: a running server re-reads its keys every 5
 minutes, so a cron job or systemd timer can rotate on a schedule (every
-30 days is a good choice for a hosted server). Run it from one place only;
-servers sharing a data directory all pick up the same key. The gateway
+30 days is a good choice for a hosted server). The gateway
 serves only the new key configuration, under a new key id, and `info`
 publishes its hash, so wallets fetch it again. The old key keeps working
 for 7 days, for wallets that cached it, and is then deleted from memory
@@ -96,7 +95,9 @@ lz-server <config.toml> rotate-vapid              # routine
 lz-server <config.toml> rotate-vapid --drop-old   # suspected leak
 ```
 
-Then restart the server. Push subscriptions are bound to the key they were
+Stop the server first, and start it again afterwards: while it runs, it
+holds the data directory, and `rotate-vapid` refuses to start. Push
+subscriptions are bound to the key they were
 created with (spec §5.3), so each device record keeps its key, and `info`
 publishes the new one. Wallets notice the change, subscribe again with the
 new key, and delete their old device record; the old key, in
@@ -104,6 +105,16 @@ new key, and delete their old device record; the old key, in
 uses it. With `--drop-old`, old keys are deleted at once and the devices
 bound to them are dropped at the next start; those wallets register again
 when their next `wake` gets `unknown-device`.
+
+## One server per data directory
+
+A server keeps device records and replay windows in memory and writes
+`state.json` whole, so it takes `data_dir/server.lock` at start, and a
+second server, or `rotate-vapid`, on the same directory refuses to start
+until it stops. Run one server per deployment and give it more CPU and
+memory as it grows; several servers behind one URL would also each send
+every wake-up. `new-account`, `rotate-ohttp`, and `doctor` work while it
+runs.
 
 ## Security notes
 

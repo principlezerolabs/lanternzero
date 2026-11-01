@@ -106,6 +106,9 @@ impl Store {
     }
 
     /// Removes a device whose push subscription is gone (`404`/`410`).
+    /// Written with the next periodic flush, not at once: a wake round can
+    /// remove many, and one lost in a crash is removed again at the next
+    /// push.
     pub fn remove_device(&self, device_id: &str) {
         let removed = self
             .state
@@ -115,7 +118,7 @@ impl Store {
             .remove(device_id)
             .is_some();
         if removed {
-            self.flush_now();
+            *self.dirty.lock().expect("dirty lock") = true;
         }
     }
 

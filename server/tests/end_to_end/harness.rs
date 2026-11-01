@@ -216,15 +216,39 @@ impl Harness {
         .await
     }
 
-    /// The same server started again on its data directory, as after a
-    /// restart (keys, accounts, and devices reload from disk).
-    pub(crate) fn restart(&self) -> Self {
-        let state = AppState::new(self.state.config.clone()).unwrap();
+    /// The same server stopped and started again on its data directory
+    /// (keys, accounts, and devices reload from disk).
+    pub(crate) fn restart(self) -> Self {
+        self.restart_with(|_| {})
+    }
+
+    /// [`restart`](Self::restart), running `offline` (a command such as
+    /// `rotate-vapid`) while the server is stopped. The old server must be
+    /// gone first: it holds the data directory's lock.
+    pub(crate) fn restart_with(self, offline: impl FnOnce(&std::path::Path)) -> Self {
+        let Self {
+            state,
+            app,
+            token,
+            seq,
+        } = self;
+        let config = state.config.clone();
+        drop(app);
+        assert_eq!(
+            Arc::strong_count(&state),
+            1,
+            "the old server is still running"
+        );
+        // As `serve` does on a clean shutdown.
+        state.store.flush_if_dirty();
+        drop(state);
+        offline(&config.data_dir);
+        let state = AppState::new(config).unwrap();
         Self {
             app: gateway::router(state.clone()),
             state,
-            token: self.token.clone(),
-            seq: self.seq,
+            token,
+            seq,
         }
     }
 

@@ -93,7 +93,7 @@ pub async fn run(state: Arc<AppState>) {
         tokio::time::sleep(until_next_slot(SystemTime::now())).await;
         let stats = wake_round(&state, SPREAD).await;
         tracing::info!(?stats, "wake round finished");
-        state.store.flush_if_dirty();
+        state.flush_store().await;
     }
 }
 

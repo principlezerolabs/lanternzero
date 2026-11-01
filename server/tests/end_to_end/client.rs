@@ -407,10 +407,10 @@ async fn vapid_rotation_keeps_devices_on_their_key_until_they_move() {
     let r = relay(&h, p.request()).await;
     unnamed.finish_register(p, reply(&r)).unwrap();
 
-    // Rotate, then restart.
-    let k2 = lz_server::rotate_vapid(&dir, false).unwrap();
+    // Stop, rotate, start.
+    let mut k2 = String::new();
+    let h = h.restart_with(|dir| k2 = lz_server::rotate_vapid(dir, false).unwrap());
     assert_ne!(k2, k1);
-    let h = h.restart();
     assert_eq!(h.state.vapid.current().public_b64, k2);
     assert_eq!(h.state.vapid.retired().collect::<Vec<_>>(), [k1.as_str()]);
     let vapid_of = |h: &Harness, id: &str| {
@@ -517,8 +517,8 @@ async fn vapid_rotation_keeps_devices_on_their_key_until_they_move() {
     assert!(h.state.vapid.get(&k1).is_none());
 
     // After a suspected leak, the old key goes at once, with its devices.
-    let k3 = lz_server::rotate_vapid(&dir, true).unwrap();
-    let h = h.restart();
+    let mut k3 = String::new();
+    let h = h.restart_with(|dir| k3 = lz_server::rotate_vapid(dir, true).unwrap());
     assert_eq!(h.state.vapid.current().public_b64, k3);
     assert_eq!(h.state.vapid.retired().count(), 0);
     assert!(

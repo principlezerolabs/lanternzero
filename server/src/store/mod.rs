@@ -48,6 +48,8 @@ pub use devices::Device;
 
 pub const ACCOUNTS_FILE: &str = "accounts.txt";
 const STATE_FILE: &str = "state.json";
+/// Locked by the one process that owns `state.json` while it runs.
+const INSTANCE_LOCK: &str = "server.lock";
 /// How long a rotated-out token keeps working if the new one isn't used
 /// (spec §4.6).
 pub const ROTATION_GRACE_SECS: u64 = 24 * 3600;
@@ -157,6 +159,25 @@ pub struct Store {
     track_activity: AtomicBool,
     /// Keep deleted account ids for the issuer.
     log_deletions: AtomicBool,
+    /// The exclusive lock on [`INSTANCE_LOCK`], released on drop.
+    _instance: std::fs::File,
+}
+
+/// Takes [`INSTANCE_LOCK`] without waiting.
+fn lock_instance(dir: &Path) -> std::io::Result<std::fs::File> {
+    let f = crate::files::private_file()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(dir.join(INSTANCE_LOCK))?;
+    match f.try_lock() {
+        Ok(()) => Ok(f),
+        Err(std::fs::TryLockError::WouldBlock) => Err(std::io::Error::new(
+            std::io::ErrorKind::WouldBlock,
+            "another lz-server process is using this data directory; stop it first",
+        )),
+        Err(std::fs::TryLockError::Error(e)) => Err(e),
+    }
 }
 
 fn check_private_file(path: &Path) -> std::io::Result<()> {
@@ -177,7 +198,14 @@ fn check_private_file(path: &Path) -> std::io::Result<()> {
 }
 
 impl Store {
+    /// Opens the store, taking the data directory for this process alone.
+    ///
+    /// Each process keeps `state.json` in memory and writes it whole, so a
+    /// second process on the same directory (a second server, or
+    /// `rotate-vapid` while the server runs) would overwrite the other's
+    /// changes. It gets `WouldBlock` instead.
     pub fn open(dir: &Path) -> std::io::Result<Self> {
+        let instance = lock_instance(dir)?;
         check_private_file(&dir.join(ACCOUNTS_FILE))?;
         check_private_file(&dir.join(STATE_FILE))?;
         let now = unix_now();
@@ -198,6 +226,7 @@ impl Store {
             flush_lock: Mutex::new(()),
             track_activity: AtomicBool::new(false),
             log_deletions: AtomicBool::new(false),
+            _instance: instance,
         };
         // Rotated-out tokens past their 24 hours: no reason to keep even
         // their hashes.
@@ -233,6 +262,7 @@ impl Store {
     /// Writes state if a replay window changed since the last write. Losing
     /// a few seconds of `seq` state is safe: the 60 s `Date` check still
     /// bounds replays (spec §3.4).
+    /// Blocks on file I/O: async code uses [`crate::AppState::flush_store`].
     pub fn flush_if_dirty(&self) {
         let dirty = std::mem::take(&mut *self.dirty.lock().expect("dirty lock"));
         if dirty {
@@ -339,6 +369,7 @@ mod tests {
         s.flush_if_dirty();
 
         // Replay state survives a restart.
+        drop(s); // A restart: the lock goes with the process.
         let s = Store::open(&dir).unwrap();
         assert_eq!(
             s.accept_device_seq(id, &d2, 12),
@@ -347,6 +378,16 @@ mod tests {
         assert_eq!(s.devices().len(), 2);
         s.delete_device(id, &d2).unwrap();
         assert_eq!(s.devices().len(), 1);
+    }
+
+    #[test]
+    fn one_process_owns_the_data_directory() {
+        let dir = tmp();
+        let first = Store::open(&dir).unwrap();
+        let second = Store::open(&dir).unwrap_err();
+        assert_eq!(second.kind(), std::io::ErrorKind::WouldBlock);
+        drop(first);
+        Store::open(&dir).unwrap();
     }
 
     #[cfg(unix)]
@@ -434,11 +475,13 @@ mod tests {
         s.rotate_token(id, &old, &new, t + 5).unwrap();
         assert_eq!(s.authenticate_at(&old, t + 10), Some(id));
         // Both survive a restart, with the old one's deadline.
+        drop(s); // A restart: the lock goes with the process.
         let s = Store::open(&dir).unwrap();
         assert_eq!(s.authenticate_at(&old, t + 10), Some(id));
         assert_eq!(s.authenticate_at(&new, t + 10), Some(id));
         // That first use of the new token retired the old one, on disk too.
         assert_eq!(s.authenticate_at(&old, t + 11), None);
+        drop(s);
         let s = Store::open(&dir).unwrap();
         assert_eq!(s.authenticate_at(&old, t + 11), None);
         assert_eq!(s.authenticate_at(&new, t + 11), Some(id));
@@ -486,6 +529,7 @@ mod tests {
         s.rotate_token(id, &old, &new, 1_800_000_000).unwrap();
         let text = std::fs::read_to_string(dir.join(ACCOUNTS_FILE)).unwrap();
         assert!(text.starts_with("# alice\n"), "{text}");
+        drop(s); // A restart: the lock goes with the process.
         let s = Store::open(&dir).unwrap();
         assert_eq!(s.authenticate(&late), Some(late_id));
         assert_eq!(s.authenticate(&new), Some(id));
@@ -526,6 +570,7 @@ mod tests {
         // A fresh window: the old seq state is gone.
         s.accept_account_seq(ida, 1).unwrap();
 
+        drop(s); // A restart: the lock goes with the process.
         let s = Store::open(&dir).unwrap();
         assert_eq!(s.authenticate(&a), None);
         assert_eq!(s.authenticate(&a_new), None);
@@ -610,6 +655,7 @@ mod tests {
         assert_eq!(store.resolve_at(&old, T0), None);
 
         // On disk too.
+        drop(store); // A restart: the lock goes with the process.
         let again = Store::open(&dir).unwrap();
         assert_eq!(again.resolve_at(&new, T0), Some(a));
     }
@@ -640,6 +686,7 @@ mod tests {
         );
 
         // Written before returning; the key isn't stored in the clear.
+        drop(store); // A restart: the lock goes with the process.
         let again = Store::open(&dir).unwrap();
         assert_eq!(again.scan_until(a, T0 + 1000), Some(T0 + 1010));
         assert_eq!(
@@ -671,6 +718,7 @@ mod tests {
         store.authenticate_at(&h, T0 + 2000);
         assert!(!*store.dirty.lock().unwrap());
 
+        drop(store); // A restart: the lock goes with the process.
         let again = Store::open(&dir).unwrap();
         again.configure(false, false);
         assert!(state_json(&dir).get("last_active_day").is_none());

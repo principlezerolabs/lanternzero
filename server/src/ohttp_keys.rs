@@ -250,7 +250,7 @@ pub fn prune(dir: &Path, now: u64) -> Result<usize, KeyError> {
         if key.accepted_until().is_none_or(|t| now >= t) {
             match std::fs::remove_file(&path) {
                 Ok(()) => pruned += 1,
-                // Another server on the same data directory got there first.
+                // A `rotate-ohttp` run, or the server, got there first.
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
                 Err(e) => return Err(KeyError::Io(path.display().to_string(), e)),
             }

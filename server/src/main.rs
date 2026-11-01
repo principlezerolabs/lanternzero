@@ -5,7 +5,7 @@
 //! `lz-server <config.toml> new-account` creates an account and prints its
 //! connection URL once (self-hosting; spec §2.3).
 //! `lz-server <config.toml> rotate-vapid [--drop-old]` replaces the VAPID
-//! key, used from the next start (spec §5.3).
+//! key, used from the next start (spec §5.3). Stop the server first.
 //! `lz-server <config.toml> rotate-ohttp [--drop-old]` replaces the OHTTP
 //! key; a running server serves it within 5 minutes, and accepts the old
 //! one for 7 days (spec §3.2).
@@ -149,7 +149,7 @@ async fn serve(config: Config) -> ExitCode {
         let mut tick = tokio::time::interval(Duration::from_secs(10));
         loop {
             tick.tick().await;
-            flusher.store.flush_if_dirty();
+            flusher.flush_store().await;
         }
     });
 
@@ -245,7 +245,7 @@ fn rotate_vapid(config: &Config, drop_old: bool) -> ExitCode {
             tracing::info!(
                 vapid_public_key = %public,
                 drop_old,
-                "new VAPID key; restart the server to use it"
+                "new VAPID key; start the server to use it"
             );
             ExitCode::SUCCESS
         }

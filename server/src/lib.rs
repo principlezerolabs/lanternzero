@@ -132,6 +132,15 @@ impl AppState {
 }
 
 impl AppState {
+    /// Writes the store's state if it changed, on a blocking thread, so
+    /// writing `state.json` doesn't hold up async tasks.
+    pub async fn flush_store(self: &Arc<Self>) {
+        let state = self.clone();
+        if let Err(e) = tokio::task::spawn_blocking(move || state.store.flush_if_dirty()).await {
+            tracing::error!(error = %e, "state flush task failed");
+        }
+    }
+
     /// Deletes an account as `DELETE /v0/account` does (spec §4.6): its
     /// token hashes, devices, and replay window on disk, then its lease,
     /// events, and hints in memory. Used by the API, the idle sweep, and
@@ -233,8 +242,9 @@ fn load_vapid(dir: &std::path::Path, store: &store::Store) -> Result<keys::Vapid
 }
 
 /// `lz-server <config> rotate-vapid [--drop-old]`: binds existing devices
-/// to the current key, then retires it (spec §5.3). Restart the server
-/// afterwards. Returns the new public key.
+/// to the current key, then retires it (spec §5.3). The server must be
+/// stopped: this takes the data directory's lock. Returns the new public
+/// key.
 pub fn rotate_vapid(dir: &std::path::Path, drop_old: bool) -> Result<String, StartError> {
     let store = store::Store::open(dir)?;
     store.pin_vapid(&keys::vapid_key(dir)?.public_b64);
