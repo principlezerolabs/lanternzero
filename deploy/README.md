@@ -49,6 +49,18 @@ docker compose exec server lz-server /var/lib/lantern-zero/config.toml new-accou
 docker compose restart server
 ```
 
+To point the server at another node, or another network, later (`.env`
+is read only by `init`):
+
+```sh
+docker compose exec server lz-server /var/lib/lantern-zero/config.toml \
+  set-chain --lightwalletd http://host.docker.internal:8137
+docker compose restart server
+```
+
+Add `--network main` (or `test`, `regtest`) to change the network too. It
+checks the new node first and changes nothing if that fails.
+
 `init` takes its options from `.env`. To pass others (`lz-server
 <config> init` with no options prints them all), give them after `init`:
 

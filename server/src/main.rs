@@ -9,6 +9,9 @@
 //! `lz-server <config.toml> rotate-ohttp [--drop-old]` replaces the OHTTP
 //! key; a running server serves it within 5 minutes, and accepts the old
 //! one for 7 days (spec §3.2).
+//! `lz-server <config.toml> set-chain --lightwalletd <url> [--network …]`
+//! points the server at another chain source after checking it; used from
+//! the next start.
 //! `lz-server <config.toml> doctor` checks the install and prints pass,
 //! warn, or fail for each check, with nothing secret in the output.
 
@@ -32,13 +35,19 @@ async fn main() -> ExitCode {
     {
         return init(&PathBuf::from(c), rest);
     }
+    // Its options aren't the one-flag shape the other commands share.
+    if let [c, cmd, rest @ ..] = args.as_slice()
+        && cmd == "set-chain"
+    {
+        return set_chain(&PathBuf::from(c), rest).await;
+    }
     let (config_path, command, flag) = match args.as_slice() {
         [c] => (PathBuf::from(c), None, None),
         [c, cmd] => (PathBuf::from(c), Some(cmd.as_str()), None),
         [c, cmd, flag] => (PathBuf::from(c), Some(cmd.as_str()), Some(flag.as_str())),
         _ => {
             tracing::error!(
-                "usage: lz-server <config.toml> [init … | new-account | rotate-vapid [--drop-old] | rotate-ohttp [--drop-old] | doctor]"
+                "usage: lz-server <config.toml> [init … | new-account | set-chain … | rotate-vapid [--drop-old] | rotate-ohttp [--drop-old] | doctor]"
             );
             return ExitCode::FAILURE;
         }
@@ -269,6 +278,38 @@ fn new_account(config: &Config) -> ExitCode {
         }
         Err(e) => {
             tracing::error!(error = %e, "cannot create the account");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// Points the server at another chain source (and network), after checking
+/// it; the server uses it from its next start.
+#[allow(clippy::print_stdout)] // Deliberate: the operator reads the result.
+async fn set_chain(config_path: &std::path::Path, args: &[String]) -> ExitCode {
+    let opts = match lz_server::set_chain::parse_args(args) {
+        Ok(o) => o,
+        Err(e) => {
+            tracing::error!("{e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    match lz_server::set_chain::run(config_path, &opts).await {
+        Ok(out) => {
+            if let Some(check) = &out.check {
+                println!("{check}");
+            }
+            if out.network_changed {
+                println!(
+                    "The network changed: wallets on the old network will refuse this server \
+                     (spec §4.7) and need new accounts on the right one."
+                );
+            }
+            println!("Chain source updated. Restart the server to use it.");
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "set-chain failed");
             ExitCode::FAILURE
         }
     }

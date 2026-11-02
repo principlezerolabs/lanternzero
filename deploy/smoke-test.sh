@@ -93,3 +93,27 @@ grep -Eq "^pass +gateway " <<<"$report" || fail "doctor: gateway didn't pass"
 # CI runners may block NTP, which only warns.
 grep -Eq "^(pass|warn) +clock " <<<"$report" || fail "doctor: clock failed"
 echo "ok: doctor"
+
+# set-chain checks a new source before changing anything, and the server
+# uses it from its next start.
+if "${kit[@]}" exec -T server lz-server "$config" set-chain \
+  --lightwalletd http://127.0.0.1:1 >/dev/null 2>&1; then
+  fail "set-chain accepted an unreachable chain source"
+fi
+"${kit[@]}" exec -T server lz-server "$config" set-chain \
+  --lightwalletd "http://zaino:8137" --network test >/dev/null 2>&1 \
+  && fail "set-chain accepted a source on the wrong network"
+# The same Zaino under its other name on the regtest network.
+"${kit[@]}" exec -T server lz-server "$config" set-chain \
+  --lightwalletd http://zaino:8137 --network regtest >/dev/null 2>&1 \
+  || fail "set-chain refused a working chain source"
+"${kit[@]}" restart server >/dev/null
+for _ in $(seq 1 30); do
+  if "${kit[@]}" logs --since 30s server 2>&1 | grep -q "chain follower at tip"; then
+    break
+  fi
+  sleep 1
+done
+"${kit[@]}" logs --since 30s server 2>&1 | grep -q "chain follower at tip" \
+  || fail "the server didn't follow the new chain source"
+echo "ok: set-chain"

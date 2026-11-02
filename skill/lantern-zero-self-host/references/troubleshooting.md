@@ -73,22 +73,26 @@ server hit `LZ_SERVER_MEMORY`. Locked memory counts against it. Raise it in
 ## Wrong chain source or network after init
 
 `init` copies `LZ_NETWORK` and `LZ_LIGHTWALLETD` into the config once;
-editing `.env` later changes nothing, and the kit has no command yet to
-change them. Explain the choices and let the user decide:
+editing `.env` later changes nothing. Use `set-chain`, with the user's
+agreement on the new values. It checks the new source first and changes
+nothing if the check fails:
 
-1. **Fix the node side** if possible: make the node answer at the address
-   already configured (for example, have it listen on the Docker bridge).
-2. **Start over** (destructive; SKILL.md, rule 5). Keep `tor-data`, so the
-   onion address stays the same, but every wallet needs the new URL:
+```sh
+docker compose exec server lz-server /var/lib/lantern-zero/config.toml \
+  set-chain --lightwalletd <url> [--network <main|test|regtest>]
+docker compose restart server
+```
 
-   ```sh
-   docker compose down
-   docker volume rm lantern-zero_lz-data
-   # fix .env, then the user runs init in their own terminal
-   docker compose up -d
-   ```
+Also update `LZ_LIGHTWALLETD` and `LZ_NETWORK` in `.env` to match, so the
+two don't disagree later. If the server isn't running, stop it and use
+`docker compose run --rm --no-deps server …` instead of `exec`. If the
+new node isn't up yet, `--no-check` skips the check; run `doctor` once it
+is.
 
-Don't edit `config.toml` instead (SKILL.md, rule 2).
+Changing the network keeps the accounts, but wallets on the old network
+refuse the server, so they need accounts on the right one. Accounts and
+URLs otherwise stay the same. Don't edit `config.toml` by hand instead
+(SKILL.md, rule 2).
 
 **`another lz-server process is using this data directory; stop it
 first`**: something ran a command that needs the server stopped (only

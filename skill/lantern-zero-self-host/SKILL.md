@@ -111,10 +111,9 @@ Then set, with the user (show the change before writing it):
 | `LZ_SERVER_MEMORY` | leave at `1g` unless doctor or the logs say otherwise |
 
 **`init` copies these into the config once.** Changing `LZ_NETWORK` or
-`LZ_LIGHTWALLETD` later does nothing, and fixing them means starting over
-with new URLs (troubleshooting.md), so confirm both with the user now:
-which network the node is on, and the exact host and port of its gRPC
-API.
+`LZ_LIGHTWALLETD` in `.env` later does nothing; `set-chain` changes them
+(troubleshooting.md). Still, confirm both with the user now: which network
+the node is on, and the exact host and port of its gRPC API.
 
 ### 4. Build, then have the user run `init`
 

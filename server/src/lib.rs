@@ -31,6 +31,7 @@ pub mod mempool;
 pub mod ohttp_keys;
 pub mod push;
 pub mod scanner;
+pub mod set_chain;
 pub mod ssrf;
 pub mod store;
 pub mod viewkey;

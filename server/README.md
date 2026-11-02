@@ -79,6 +79,15 @@ it waits for Tor to write the onion address. The Compose kit in
 [`deploy/`](../deploy/README.md) runs it for you; `init` with no options
 prints them all.
 
+### Changing the chain source
+
+`lz-server <config.toml> set-chain --lightwalletd <url> [--network …]`
+checks the new source as `doctor` does, then rewrites only `network` and
+`[chain] lightwalletd` in the config, keeping its comments; `--no-check`
+skips the check. The server uses it from its next start. Nothing stored
+depends on the chain source, so accounts carry over; after a network
+change, wallets on the old network refuse the server (§4.7).
+
 ### Rotating the OHTTP key
 
 ```sh
