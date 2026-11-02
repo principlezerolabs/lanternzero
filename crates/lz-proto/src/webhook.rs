@@ -1,7 +1,36 @@
 //! Webhook ids, secrets, and signatures (spec §4.5, Standard Webhooks).
 //!
-//! The server signs each delivery with the account's secret; a merchant's
-//! receiver verifies it with [`verify`].
+//! The server signs each delivery with the account's secret. A merchant's
+//! receiver hands each request to [`receive`], whatever HTTP framework it
+//! uses:
+//!
+//! ```
+//! use lz_proto::webhook::{SigningSecret, receive, sign};
+//!
+//! // The secret `PUT /v0/webhook` returned once, kept in the merchant's
+//! // secret store.
+//! let secret = SigningSecret::parse(&SigningSecret::from_bytes([7; 32]).encode()).unwrap();
+//! # let body = br#"{"id":"ev1","rev":1,"kind":"received","status":"mined","height":3600000,
+//! #   "confirmations":10,"txid":"ab","pool":"ironwood","amount":150000000,
+//! #   "memo":"b3JkZXIgNDIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}"#;
+//! # let now = 1_800_000_000;
+//! # let id = "ev1.AAAAAAAAAAAA";
+//! # let timestamp = now.to_string();
+//! # let signature = sign(&secret, id, now, body);
+//! // From the request: the three `webhook-*` headers and the raw body.
+//! match receive(&secret, id, &timestamp, &signature, body, now) {
+//!     Ok(delivery) => {
+//!         // Deduplicate on `webhook-id` (keep ids for 7 days), then act
+//!         // on the state. Credit an order only once `confirmations`
+//!         // reaches the finality depth `info` reports.
+//!         assert_eq!(delivery.amount, 150_000_000);
+//!         assert_eq!(delivery.memo_text().as_deref(), Some("order 42"));
+//!         // Answer 2xx. Answer 410 only to delete the webhook for good.
+//!     }
+//!     // Answer 401 (or 400); the server retries, and nothing is credited.
+//!     Err(_) => {}
+//! }
+//! ```
 
 use base64::Engine as _;
 use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
@@ -9,7 +38,49 @@ use hmac::{Hmac, Mac};
 use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
 
-use crate::api::EventStatus;
+use crate::api::{EventStatus, WebhookDelivery};
+
+/// Most a delivery's `webhook-timestamp` may differ from the receiver's
+/// clock (Standard Webhooks' 5 minutes), against replays of old ones.
+pub const TIMESTAMP_TOLERANCE_SECS: u64 = 300;
+
+/// Why [`receive`] refused a delivery.
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum ReceiveError {
+    /// No valid signature with this secret: not from the server, altered,
+    /// or signed with a secret a later `PUT /v0/webhook` replaced.
+    #[error("bad webhook signature")]
+    BadSignature,
+    /// Signed, but the timestamp is further than
+    /// [`TIMESTAMP_TOLERANCE_SECS`] from now: a replay, or a clock off.
+    #[error("webhook timestamp outside the tolerance")]
+    Stale,
+    /// Signed and current, but not a delivery body this version knows.
+    #[error("malformed webhook body")]
+    Malformed,
+}
+
+/// Checks one delivery as a receiver gets it: the `webhook-id`,
+/// `webhook-timestamp`, and `webhook-signature` headers and the raw body,
+/// at `now_unix_secs`. Checks the signature first, then the timestamp,
+/// then parses the body. Deduplicating on `webhook-id` is the caller's.
+pub fn receive(
+    secret: &SigningSecret,
+    id: &str,
+    timestamp: &str,
+    signature: &str,
+    body: &[u8],
+    now_unix_secs: u64,
+) -> Result<WebhookDelivery, ReceiveError> {
+    let ts: u64 = timestamp.parse().map_err(|_| ReceiveError::BadSignature)?;
+    if !verify(secret, id, ts, body, signature) {
+        return Err(ReceiveError::BadSignature);
+    }
+    if ts.abs_diff(now_unix_secs) > TIMESTAMP_TOLERANCE_SECS {
+        return Err(ReceiveError::Stale);
+    }
+    serde_json::from_slice(body).map_err(|_| ReceiveError::Malformed)
+}
 
 /// Prefix of a signing secret's text form.
 pub const SECRET_PREFIX: &str = "whsec_";
@@ -167,5 +238,81 @@ mod tests {
         let other = SigningSecret::from_bytes([2; SECRET_LEN]);
         assert!(!verify(&other, "id.x", 1_800_000_000, b"{}", &sig));
         assert!(!verify(&s, "id.x", 1_800_000_000, b"{}", "v1a,abc"));
+    }
+
+    #[test]
+    fn receivers_check_signature_then_time_then_body() {
+        let s = SigningSecret::from_bytes([3; SECRET_LEN]);
+        let now = 1_800_000_000;
+        let body = br#"{"id":"e","rev":1,"kind":"received","status":"mempool","height":null,"confirmations":0,"txid":"ab","pool":"sapling","amount":1,"memo":null}"#;
+        let sig = sign(&s, "e.x", now, body);
+        let ts = now.to_string();
+        let d = receive(&s, "e.x", &ts, &sig, body, now + 10).unwrap();
+        assert_eq!(d.amount, 1);
+        assert_eq!(d.memo_text(), None);
+        let other = SigningSecret::from_bytes([4; SECRET_LEN]);
+        assert_eq!(
+            receive(&other, "e.x", &ts, &sig, body, now).unwrap_err(),
+            ReceiveError::BadSignature
+        );
+        assert_eq!(
+            receive(&s, "e.y", &ts, &sig, body, now).unwrap_err(),
+            ReceiveError::BadSignature,
+            "the id is signed"
+        );
+        assert_eq!(
+            receive(&s, "e.x", "soon", &sig, body, now).unwrap_err(),
+            ReceiveError::BadSignature
+        );
+        assert_eq!(
+            receive(
+                &s,
+                "e.x",
+                &ts,
+                &sig,
+                body,
+                now + TIMESTAMP_TOLERANCE_SECS + 1
+            )
+            .unwrap_err(),
+            ReceiveError::Stale
+        );
+        let junk = b"{}";
+        let junk_sig = sign(&s, "e.x", now, junk);
+        assert_eq!(
+            receive(&s, "e.x", &ts, &junk_sig, junk, now).unwrap_err(),
+            ReceiveError::Malformed
+        );
+    }
+
+    #[test]
+    fn memos_read_as_zip_302() {
+        use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        let delivery = |memo: Option<[u8; 512]>| WebhookDelivery {
+            event: crate::api::Event {
+                id: "e".into(),
+                rev: 1,
+                kind: crate::api::EventKind::Received,
+                status: EventStatus::Mined,
+                height: Some(1),
+                confirmations: 1,
+                compact_tx: None,
+            },
+            txid: "ab".into(),
+            pool: crate::event_id::Pool::Sapling,
+            amount: 1,
+            memo: memo.map(|m| URL_SAFE_NO_PAD.encode(m)),
+        };
+        let mut text = [0u8; 512];
+        text[..6].copy_from_slice("héllo".as_bytes());
+        assert_eq!(delivery(Some(text)).memo_text().as_deref(), Some("héllo"));
+        let mut empty = [0u8; 512];
+        empty[0] = 0xF6;
+        assert_eq!(delivery(Some(empty)).memo_text(), None);
+        assert_eq!(delivery(Some(empty)).memo_bytes().unwrap()[0], 0xF6);
+        let mut bad = [0u8; 512];
+        bad[0] = 0xC3; // a lone UTF-8 lead byte
+        assert_eq!(delivery(Some(bad)).memo_text(), None);
+        assert_eq!(delivery(None).memo_bytes(), None);
+        assert_eq!(delivery(Some([0; 512])).memo_text().as_deref(), Some(""));
     }
 }

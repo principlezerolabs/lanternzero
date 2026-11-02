@@ -209,6 +209,26 @@ pub struct WebhookDelivery {
     pub memo: Option<String>,
 }
 
+impl WebhookDelivery {
+    /// The memo field's 512 bytes, if the delivery has a memo.
+    pub fn memo_bytes(&self) -> Option<Vec<u8>> {
+        let bytes = URL_SAFE_NO_PAD.decode(self.memo.as_deref()?).ok()?;
+        (bytes.len() == 512).then_some(bytes)
+    }
+
+    /// The memo as text, if it is a ZIP 302 text memo (first byte at most
+    /// `0xF4`, UTF-8, zero-padded). `None` for no memo (`0xF6`), other
+    /// kinds, invalid UTF-8, or no memo field at all.
+    pub fn memo_text(&self) -> Option<String> {
+        let bytes = self.memo_bytes()?;
+        if bytes[0] > 0xF4 {
+            return None;
+        }
+        let end = bytes.iter().rposition(|&b| b != 0).map_or(0, |i| i + 1);
+        String::from_utf8(bytes[..end].to_vec()).ok()
+    }
+}
+
 impl std::fmt::Debug for WebhookDelivery {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("WebhookDelivery")

@@ -333,7 +333,7 @@ async fn a_merchant_sets_and_deletes_its_webhook_through_the_client_core() {
 async fn mempool_payments_carry_their_memo_to_the_final_delivery() {
     let mut s = shop().await;
     let (url, got) = receiver(StatusCode::OK).await;
-    s.put_webhook(&url).await;
+    let secret = s.put_webhook(&url).await;
     s.lease().await;
     let memo = text_memo("order 42");
     let raw = wallet::full_tx_with_memo(&s.alice, true, true, memo);
@@ -352,6 +352,20 @@ async fn mempool_payments_carry_their_memo_to_the_final_delivery() {
     }
     pools.sort();
     assert_eq!(pools, ["ironwood", "sapling"]);
+    // As a merchant's receiver reads it (lz_proto::webhook::receive).
+    let (headers, body) = got.0.lock().unwrap()[0].clone();
+    let header = |name: &str| headers[name].to_str().unwrap().to_owned();
+    let now = lz_server::clock::unix_now();
+    let delivery = lz_proto::webhook::receive(
+        &secret,
+        &header("webhook-id"),
+        &header("webhook-timestamp"),
+        &header("webhook-signature"),
+        &body,
+        now,
+    )
+    .unwrap();
+    assert_eq!(delivery.memo_text().as_deref(), Some("order 42"));
     // Not in what wallets fetch: they get their own memos (spec §6.3).
     let page = s.h.state.scanner.page(s.account, None, 3500);
     assert!(
