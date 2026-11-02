@@ -3,8 +3,8 @@
 **Status:** proposal (2026-10-31). Layer 1 is a prototype (2026-11-01):
 `lz-server init` and `doctor`, and the Compose kit with both profiles and
 the §6.2 hardening, tested on regtest by `smoke-test.sh`. Not built yet:
-signed, published images, `doctor`'s reachability and clock checks, and
-layers 3 and 4.
+signed, published images, a `doctor` check of the onion name itself (it
+checks the address Tor forwards to), and layers 3 and 4.
 
 Packaging is not the hard part of self-hosting Lantern Zero. Two other
 things are:

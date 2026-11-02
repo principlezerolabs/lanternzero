@@ -4,8 +4,9 @@
 //! keys, URLs, host names, or file contents, so it is safe to paste into an
 //! issue or hand to the self-hosting skill.
 
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::Path;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::clock::unix_now;
 use crate::config::Config;
@@ -57,6 +58,8 @@ pub async fn run(config: &Config) -> Vec<Check> {
         memory(&hardening::inspect(), config),
         ohttp_key(config, unix_now()),
         chain(config).await,
+        gateway(config).await,
+        clock(TIME_SERVER).await,
     ]
 }
 
@@ -281,9 +284,250 @@ pub fn tip_check(tip: u64, block_time: u64, now: u64) -> Check {
     }
 }
 
+/// How long the gateway check waits.
+const GATEWAY_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// Where the server answers wallets: as an onion service, the listen
+/// address Tor forwards to; over OHTTP, the public gateway URL relays
+/// forward to. Either must serve this server's current key configuration
+/// at `/.well-known/ohttp-gateway`. The onion name itself would need a
+/// Tor client, which the kit's Tor doesn't offer (no SOCKS port).
+pub async fn gateway(config: &Config) -> Check {
+    const NAME: &str = "gateway";
+    let path = crate::gateway::GATEWAY_PATH;
+    let url = if config.direct_api {
+        format!("http://{}{path}", local_target(config.listen))
+    } else {
+        format!("https://{}{path}", config.public_host)
+    };
+    let expected = match crate::ohttp_keys::read_current(&config.data_dir) {
+        Ok(Some(key)) => key.served().ok(),
+        _ => None,
+    };
+    let Ok(client) = reqwest::Client::builder()
+        .timeout(GATEWAY_TIMEOUT)
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+    else {
+        return check(Status::Fail, NAME, "couldn't set up an HTTP client");
+    };
+    // Errors and URLs name the host: print neither.
+    let served = match client.get(&url).send().await {
+        Ok(r) if r.status() == reqwest::StatusCode::OK => r.bytes().await.ok(),
+        Ok(r) => {
+            return check(
+                Status::Fail,
+                NAME,
+                format!("the gateway answered {}", r.status().as_u16()),
+            );
+        }
+        Err(_) => None,
+    };
+    gateway_check(config.direct_api, served.as_deref(), expected.as_deref())
+}
+
+/// Judges what the gateway served, given the configuration on disk.
+pub fn gateway_check(onion: bool, served: Option<&[u8]>, expected: Option<&[u8]>) -> Check {
+    const NAME: &str = "gateway";
+    let Some(served) = served else {
+        let detail = if onion {
+            "nothing answers on the listen address: is the server running?"
+        } else {
+            "can't reach the public gateway over HTTPS: check DNS, TLS, and the \
+             proxy in front of the server"
+        };
+        return check(Status::Fail, NAME, detail);
+    };
+    if let Some(expected) = expected
+        && served != expected
+    {
+        return check(
+            Status::Fail,
+            NAME,
+            "it serves another key configuration than this server's: another \
+             server answers there, or a cache in front of it is stale",
+        );
+    }
+    let detail = if onion {
+        "answers on the listen address, where Tor forwards; the onion name \
+         itself isn't checked"
+    } else {
+        "the public gateway answers with this server's key configuration"
+    };
+    check(Status::Pass, NAME, detail)
+}
+
+/// `listen` as an address to connect to: an unspecified address means
+/// this machine.
+fn local_target(listen: SocketAddr) -> SocketAddr {
+    let ip = match listen.ip() {
+        IpAddr::V4(ip) if ip.is_unspecified() => IpAddr::V4(Ipv4Addr::LOCALHOST),
+        IpAddr::V6(ip) if ip.is_unspecified() => IpAddr::V6(Ipv6Addr::LOCALHOST),
+        ip => ip,
+    };
+    SocketAddr::new(ip, listen.port())
+}
+
+/// The NTP server `doctor` asks for the time.
+pub const TIME_SERVER: &str = "pool.ntp.org:123";
+/// How long to wait for its answer.
+const TIME_TIMEOUT: Duration = Duration::from_secs(5);
+/// Seconds from 1900 (NTP's epoch) to 1970.
+const NTP_UNIX_OFFSET: u64 = 2_208_988_800;
+
+/// This machine's clock against an NTP server (one SNTP query, RFC 4330).
+/// Requests more than 60 s off the server's clock are rejected (spec
+/// §3.4); wallets correct for the server's clock, but webhook receivers
+/// and push gateways check times too.
+pub async fn clock(server: &str) -> Check {
+    match tokio::time::timeout(TIME_TIMEOUT, sntp_offset(server)).await {
+        Ok(Some(offset)) => clock_check(offset),
+        _ => check(
+            Status::Warn,
+            "clock",
+            "couldn't ask a time server (is UDP port 123 blocked?); clock not checked",
+        ),
+    }
+}
+
+/// Judges an offset in seconds (positive: this clock is behind).
+pub fn clock_check(offset: f64) -> Check {
+    const NAME: &str = "clock";
+    let off = offset.abs();
+    let way = if offset > 0.0 { "behind" } else { "ahead" };
+    if off <= 5.0 {
+        check(Status::Pass, NAME, format!("within {off:.1} s of NTP time"))
+    } else if off <= 60.0 {
+        check(
+            Status::Warn,
+            NAME,
+            format!("{off:.0} s {way}: turn on time sync"),
+        )
+    } else {
+        check(
+            Status::Fail,
+            NAME,
+            format!("{off:.0} s {way}: past the 60 s replay window (spec §3.4); turn on time sync"),
+        )
+    }
+}
+
+/// One SNTP exchange; returns the offset in seconds.
+async fn sntp_offset(server: &str) -> Option<f64> {
+    let addr = tokio::net::lookup_host(server).await.ok()?.next()?;
+    let bind: SocketAddr = if addr.is_ipv4() {
+        (Ipv4Addr::UNSPECIFIED, 0).into()
+    } else {
+        (Ipv6Addr::UNSPECIFIED, 0).into()
+    };
+    let socket = tokio::net::UdpSocket::bind(bind).await.ok()?;
+    socket.connect(addr).await.ok()?;
+    // A random transmit timestamp: the reply must echo it as its
+    // originate timestamp, so a forged or stray reply is ignored.
+    let nonce: [u8; 8] = rand::random();
+    let mut request = [0u8; 48];
+    request[0] = 0x23; // LI 0, version 4, mode 3 (client)
+    request[40..].copy_from_slice(&nonce);
+    let sent = SystemTime::now();
+    socket.send(&request).await.ok()?;
+    let mut reply = [0u8; 128];
+    let n = socket.recv(&mut reply).await.ok()?;
+    let received = SystemTime::now();
+    sntp_parse(&reply[..n], &nonce, unix_f64(sent)?, unix_f64(received)?)
+}
+
+fn unix_f64(t: SystemTime) -> Option<f64> {
+    Some(t.duration_since(UNIX_EPOCH).ok()?.as_secs_f64())
+}
+
+/// Reads an SNTP reply to a request sent at `sent` and received at
+/// `received` (Unix seconds). `None` unless it is a synchronized server's
+/// answer to `nonce`.
+pub fn sntp_parse(reply: &[u8], nonce: &[u8; 8], sent: f64, received: f64) -> Option<f64> {
+    if reply.len() < 48 {
+        return None;
+    }
+    let leap = reply[0] >> 6;
+    let mode = reply[0] & 0x07;
+    let stratum = reply[1];
+    if leap == 3 || mode != 4 || !(1..=15).contains(&stratum) || reply[24..32] != nonce[..] {
+        return None;
+    }
+    let secs = u64::from(u32::from_be_bytes(reply[40..44].try_into().ok()?));
+    let frac = f64::from(u32::from_be_bytes(reply[44..48].try_into().ok()?)) / 4_294_967_296.0;
+    let server = secs.checked_sub(NTP_UNIX_OFFSET)? as f64 + frac;
+    Some(server - (sent + received) / 2.0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Needs the network: `cargo test -p lz-server -- --ignored clock_against`.
+    #[tokio::test]
+    #[ignore]
+    async fn clock_against_the_ntp_pool() {
+        let c = clock(TIME_SERVER).await;
+        assert_eq!(c.status, Status::Pass, "{c}");
+    }
+
+    #[test]
+    fn clock_offsets() {
+        assert_eq!(clock_check(0.3).status, Status::Pass);
+        let behind = clock_check(20.0);
+        assert_eq!(behind.status, Status::Warn);
+        assert!(behind.detail.contains("behind"), "{}", behind.detail);
+        let ahead = clock_check(-90.0);
+        assert_eq!(ahead.status, Status::Fail);
+        assert!(ahead.detail.contains("ahead"), "{}", ahead.detail);
+    }
+
+    #[test]
+    fn sntp_replies() {
+        let nonce = [9u8; 8];
+        let mut reply = [0u8; 48];
+        reply[0] = 0x24; // LI 0, version 4, mode 4 (server)
+        reply[1] = 2;
+        reply[24..32].copy_from_slice(&nonce);
+        // 1_800_000_010.5 in NTP time.
+        let secs = (1_800_000_010u64 + NTP_UNIX_OFFSET) as u32;
+        reply[40..44].copy_from_slice(&secs.to_be_bytes());
+        reply[44..48].copy_from_slice(&(1u32 << 31).to_be_bytes());
+        let offset = sntp_parse(&reply, &nonce, 1_800_000_000.0, 1_800_000_001.0).unwrap();
+        assert!((offset - 10.0).abs() < 1e-3, "{offset}");
+
+        assert_eq!(sntp_parse(&reply, &[0; 8], 0.0, 0.0), None, "wrong nonce");
+        let mut unsynced = reply;
+        unsynced[0] = 0xE4;
+        assert_eq!(sntp_parse(&unsynced, &nonce, 0.0, 0.0), None);
+        let mut kiss = reply;
+        kiss[1] = 0;
+        assert_eq!(sntp_parse(&kiss, &nonce, 0.0, 0.0), None, "kiss-o'-death");
+        assert_eq!(sntp_parse(&reply[..40], &nonce, 0.0, 0.0), None);
+    }
+
+    #[test]
+    fn gateway_answers() {
+        let ok = gateway_check(true, Some(b"cfg"), Some(b"cfg"));
+        assert_eq!(ok.status, Status::Pass);
+        assert!(ok.detail.contains("onion name"));
+        assert_eq!(
+            gateway_check(false, Some(b"cfg"), None).status,
+            Status::Pass
+        );
+        let other = gateway_check(false, Some(b"old"), Some(b"cfg"));
+        assert_eq!(other.status, Status::Fail);
+        assert!(other.detail.contains("stale"));
+        assert_eq!(gateway_check(true, None, Some(b"cfg")).status, Status::Fail);
+        assert_eq!(
+            local_target("0.0.0.0:8080".parse().unwrap()),
+            "127.0.0.1:8080".parse().unwrap()
+        );
+        assert_eq!(
+            local_target("172.30.77.10:8080".parse().unwrap()),
+            "172.30.77.10:8080".parse().unwrap()
+        );
+    }
 
     #[test]
     fn tip_age_and_clock() {

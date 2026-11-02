@@ -449,3 +449,38 @@ async fn gateway_429_retry_after_pauses_the_device() {
     assert_eq!(second.rate_limited, 1);
     assert_eq!(captured.0.lock().unwrap().len(), 1);
 }
+
+/// `doctor`'s gateway check against a running server: it must serve this
+/// data directory's key configuration where Tor forwards.
+#[tokio::test]
+async fn doctor_finds_the_gateway_and_its_key_configuration() {
+    use lz_server::doctor::{Status, gateway};
+    let h = super::harness::harness(false);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let app = lz_server::gateway::router(h.state.clone());
+    tokio::spawn(async move { axum::serve(listener, app).await });
+    let mut config = h.state.config.clone();
+    config.listen = addr;
+    config.direct_api = true;
+    assert_eq!(gateway(&config).await.status, Status::Pass);
+
+    // Another server's data directory: the key configuration differs.
+    let other = super::harness::harness(false);
+    config.data_dir = other.state.config.data_dir.clone();
+    let c = gateway(&config).await;
+    assert_eq!(c.status, Status::Fail);
+    assert!(
+        c.detail.contains("another key configuration"),
+        "{}",
+        c.detail
+    );
+
+    // Nothing listening.
+    let closed = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    config.listen = closed.local_addr().unwrap();
+    drop(closed);
+    let c = gateway(&config).await;
+    assert_eq!(c.status, Status::Fail);
+    assert!(c.detail.contains("is the server running"), "{}", c.detail);
+}

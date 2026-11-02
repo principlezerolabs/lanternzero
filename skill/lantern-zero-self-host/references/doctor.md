@@ -81,3 +81,45 @@ The node the server reads blocks from.
 - **FAIL** `invalid [chain] lightwalletd URL`: same as a wrong URL.
 - **warn** `no [chain]`: the kit always writes a chain source; suggest an
   issue.
+
+## `gateway`
+
+Whether the server answers where wallets reach it, with its own key
+configuration.
+
+- **pass** `answers on the listen address, where Tor forwards; the onion
+  name itself isn't checked`: the server side is fine. If wallets still
+  can't connect, the onion service is the suspect: check the Tor container
+  (`docker compose logs --tail 50 tor`); it can take a few minutes after a
+  start to publish the onion service.
+- **pass** `the public gateway answers with this server's key
+  configuration`: for servers behind OHTTP relays, which the kit doesn't
+  set up yet.
+- **FAIL** `nothing answers on the listen address: is the server
+  running?`: start it (`docker compose up -d`), then check its logs. When
+  `doctor` runs with the server stopped, this line always fails.
+- **FAIL** `can't reach the public gateway over HTTPS…`: only for OHTTP
+  servers; the kit doesn't set them up. Suggest an issue.
+- **FAIL** `the gateway answered N`: something other than the server
+  answers at that address. Suggest an issue with `docker compose ps`.
+- **FAIL** `it serves another key configuration…`: another server answers
+  at that address, or a cache in front of it is stale. In the kit this
+  means two installs share an address (for example `LZ_SERVER_IP` reused
+  in another project). Ask the user before changing anything.
+
+## `clock`
+
+This machine's clock, against `pool.ntp.org`. `doctor` sends it one
+time query (UDP port 123); nothing else is sent.
+
+- **pass** `within N s of NTP time`: fine.
+- **warn** `N s behind` / `ahead: turn on time sync`: within the 60 s
+  replay window, but drifting. Turn on time sync on the host
+  (`timedatectl set-ntp true` on systemd hosts). Containers use the
+  host's clock, so fix it on the host.
+- **FAIL** `… past the 60 s replay window`: webhook receivers and push
+  gateways may refuse what the server sends. Same fix, then run `doctor`
+  again.
+- **warn** `couldn't ask a time server…`: the host or network blocks
+  outgoing NTP. The clock isn't checked; if the host keeps time some other
+  way, nothing to do.

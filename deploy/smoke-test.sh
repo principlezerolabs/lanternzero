@@ -89,4 +89,7 @@ done
 # Regtest blocks carry old timestamps, so `chain` warns about the tip's
 # age; it must not fail.
 grep -Eq "^(pass|warn) +chain " <<<"$report" || fail "doctor: chain failed"
+grep -Eq "^pass +gateway " <<<"$report" || fail "doctor: gateway didn't pass"
+# CI runners may block NTP, which only warns.
+grep -Eq "^(pass|warn) +clock " <<<"$report" || fail "doctor: clock failed"
 echo "ok: doctor"

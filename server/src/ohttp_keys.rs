@@ -109,6 +109,12 @@ impl OhttpKey {
         )?)
     }
 
+    /// The configuration list the gateway serves while this key is
+    /// current (`application/ohttp-keys`).
+    pub fn served(&self) -> Result<Vec<u8>, KeyError> {
+        Ok(KeyConfig::encode_list(&[&self.config()?])?)
+    }
+
     /// For a retired key, the end of its overlap.
     pub fn accepted_until(&self) -> Option<u64> {
         self.retired_at.map(|t| t.saturating_add(OVERLAP_SECS))
@@ -299,7 +305,7 @@ struct Keys {
 impl Keys {
     fn build(keys: &OhttpKeys) -> Result<Self, KeyError> {
         let config = keys.current.config()?;
-        let encoded = KeyConfig::encode_list(&[&config])?;
+        let encoded = keys.current.served()?;
         let sha256_hex = lz_proto::key_config_sha256_hex(&encoded);
         let mut retired = Vec::new();
         for k in &keys.retired {

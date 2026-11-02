@@ -39,12 +39,12 @@ scanning also against real Zebra and Zaino on regtest
   but the decoded Sapling and Orchard key types from the Zcash crates don't
   zero themselves on drop. Locked memory and no core dumps (below) keep
   them off disk meanwhile.
-- **Memos in webhooks.** Deliveries always have `memo: null`: compact
-  blocks carry no memo, and fetching the transaction by txid is ruled out
-  (invariant 7). Mempool transactions arrive in full and could supply it.
-- **More `doctor` checks** (deploy/DESIGN.md). `doctor` doesn't yet check
-  that the onion service or OHTTP gateway answers from outside, or the
-  clock beyond what the tip's age shows.
+- **Memos for payments first seen in a block.** Webhook memos come from
+  the mempool's full transactions (spec §4.5); a payment the server first
+  sees in a compact block has `memo: null`, because fetching the
+  transaction by txid is ruled out (invariant 7).
+- **Onion reachability in `doctor`.** `doctor` checks the listen address
+  Tor forwards to, not the onion name itself, which needs a Tor client.
 - **Live account loading for `new-account`.** Accounts the CLI adds take
   effect after a restart; accounts made through the issuer socket are live
   at once.
@@ -156,9 +156,12 @@ runs.
   may reach 64 MiB). The calls go through `rustix`, so the workspace still
   has no `unsafe` of its own.
 - **`lz-server <config> doctor`** checks the data directory's
-  permissions, core dumps, memory and swap, the OHTTP key's age, and the
-  chain source (network and tip age), and prints pass, warn, or fail for each. Its output has no
-  tokens, keys, URLs, or host names, so it's safe to paste into an issue.
+  permissions, core dumps, memory and swap, the OHTTP key's age, the
+  chain source (network and tip age), that the gateway serves this
+  server's key configuration where wallets reach it, and the clock against
+  `pool.ntp.org` (one SNTP query), and prints pass, warn, or fail for
+  each. Its output has no tokens, keys, URLs, or host names, so it's safe
+  to paste into an issue.
 - **Web Push crypto** (`src/webpush.rs`) is built on RustCrypto primitives
   and checked against the RFC 8291 test vector. Existing Web Push crates
   depend on a `crypto-bigint` with timing leaks (RUSTSEC-2026-0387).
