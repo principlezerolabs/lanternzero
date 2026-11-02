@@ -30,8 +30,11 @@ x-hardening: &hardening
     - no-new-privileges:true
   logging: *logging
 
+# Built here by default. To use the published, signed images instead, set
+# LZ_SERVER_IMAGE and LZ_TOR_IMAGE in .env to their digests (README.md,
+# "Published images").
 x-server-image: &server-image
-  image: lantern-zero/server:local
+  image: ${LZ_SERVER_IMAGE:-lantern-zero/server:local}
   build:
     context: ..
     dockerfile: deploy/server.Dockerfile
@@ -69,7 +72,7 @@ services:
 
   tor:
     <<: *hardening
-    image: lantern-zero/tor:local
+    image: ${LZ_TOR_IMAGE:-lantern-zero/tor:local}
     build: tor
     restart: unless-stopped
     command:

@@ -2,9 +2,10 @@
 
 **Status:** proposal (2026-10-31). Layer 1 is a prototype (2026-11-01):
 `lz-server init` and `doctor`, and the Compose kit with both profiles and
-the §6.2 hardening, tested on regtest by `smoke-test.sh`. Not built yet:
-signed, published images, a `doctor` check of the onion name itself (it
-checks the address Tor forwards to), and layers 3 and 4.
+the §6.2 hardening, tested on regtest by `smoke-test.sh`, and `set-chain`.
+The release workflow for signed images exists (2026-11-02; none published
+yet). Not built yet: a `doctor` check of the onion name itself (it checks
+the address Tor forwards to), and layers 3 and 4.
 
 Packaging is not the hard part of self-hosting Lantern Zero. Two other
 things are:
@@ -119,8 +120,10 @@ A short "Compose on any VPS" page covers this case.
 
 ## Releases
 
-- Container images are signed (cosign) and published with an SBOM. The kit
-  pins images by digest, never `latest`.
+- Container images are signed (cosign keyless, by the release workflow's
+  GitHub identity) and published to `ghcr.io/principlezerolabs` with an
+  SBOM and provenance, for amd64 and arm64. The kit pins images by digest,
+  never `latest`; until the first release it builds them locally.
 - Updates are opt-in: the scanner holds viewing keys, so nothing
   auto-updates. Release notes say whether a release touches key handling.
 - `curl | sh` is never the only install path. If a script exists, it only
@@ -135,6 +138,7 @@ A short "Compose on any VPS" page covers this case.
   rest of the repo does.
 - Which Tor image to use, and who maintains it. The prototype builds its
   own (`tor/Dockerfile`: Debian's `tor` package, non-root), so the kit
-  trusts no third-party image; we would maintain it. Its package version
-  isn't pinned yet.
+  trusts no third-party image; we would maintain it. The `tor` package is
+  pinned to a version in a fixed Debian snapshot, so security releases
+  need a deliberate bump.
 - Minimum host size for `full`, pending the same measurements.

@@ -121,6 +121,12 @@ the node is on, and the exact host and port of its gRPC API.
 docker compose build
 ```
 
+If the user wants the published images instead, follow "Published images"
+in `deploy/README.md`: verify each digest with `cosign verify`, set
+`LZ_SERVER_IMAGE` and `LZ_TOR_IMAGE` to the `@sha256:` references, run
+`docker compose pull server tor` instead of `build`, and add `--no-build`
+to `docker compose up`. Never set them to a tag.
+
 Then ask the user to run this **in their own terminal** (rule 1):
 
 ```sh

@@ -7,8 +7,9 @@ service, plus Zebra and Zaino if you don't already run a node.
 chain for the server's integration tests.
 
 **Status: prototype.** The `byo-node` profile works end to end on regtest
-(`smoke-test.sh`, run by CI). Not yet: published, signed images (you build
-them locally), mainnet testing, and an OHTTP setup in the kit. The plan is
+(`smoke-test.sh`, run by CI). Releases will publish signed images (below);
+none is published yet, so for now you build them here. Not yet: mainnet
+testing, and an OHTTP setup in the kit. The plan is
 in [`DESIGN.md`](DESIGN.md).
 
 ## What runs
@@ -70,6 +71,37 @@ docker compose run --rm init --network test --onion-hostname-file /tor/lz/hostna
   --listen 0.0.0.0:8080
 ```
 
+## Published images
+
+Each tagged release publishes both images for amd64 and arm64 to GitHub's
+container registry, signed with [cosign](https://docs.sigstore.dev/)
+(keyless, by the release workflow `.github/workflows/images.yml`) and with
+an SBOM and build provenance attached. The workflow's run summary lists
+each image's digest; release notes will too.
+
+To use them instead of building:
+
+1. Verify each digest was signed by a tagged release of this repository:
+
+   ```sh
+   cosign verify ghcr.io/principlezerolabs/lantern-zero-server@sha256:<digest> \
+     --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+     --certificate-identity-regexp '^https://github\.com/principlezerolabs/lanternzero/\.github/workflows/images\.yml@refs/tags/v'
+   ```
+
+   Do the same for `lantern-zero-tor`.
+2. Set `LZ_SERVER_IMAGE` and `LZ_TOR_IMAGE` in `.env` to the full
+   `…@sha256:<digest>` references. Never use a tag: digests can't change.
+3. Run `docker compose pull server tor` instead of `docker compose build`,
+   and `docker compose up -d --no-build` instead of `docker compose up -d`.
+
+To see what an image contains:
+
+```sh
+docker buildx imagetools inspect ghcr.io/principlezerolabs/lantern-zero-server@sha256:<digest> \
+  --format '{{ json .SBOM }}'
+```
+
 ## Check it
 
 ```sh
@@ -103,6 +135,6 @@ that reason, and has no network.
 | `compose.yaml` | The kit |
 | `.env.example` | Options; copy to `.env` (git ignores it). No secrets |
 | `server.Dockerfile` | Server image, built from the repository root |
-| `tor/` | Tor image and `torrc` |
+| `tor/` | Tor image and `torrc`; the `tor` package is pinned to a version in a fixed Debian snapshot |
 | `zebra/`, `zaino/` | Node configs for `full` |
 | `smoke-test.sh` | `byo-node` end to end against `regtest/`: `init`, hardening, `doctor` |
