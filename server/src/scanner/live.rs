@@ -173,9 +173,10 @@ pub async fn backfill(state: Arc<AppState>, bf: Backfill) {
         .await
         .unwrap_or_default();
         for m in matches {
+            // The snapshot is compact, so no memo (spec §4.5).
             let new = state.scanner.record_mempool(
                 &pending[m.tx],
-                &[Match { tx: 0, ..m }],
+                vec![(Match { tx: 0, ..m }, None)],
                 SystemTime::now(),
             );
             found_any |= !new.is_empty();

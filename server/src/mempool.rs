@@ -6,7 +6,9 @@
 //!   stream when a block is mined, and the loop opens a new one, which
 //!   starts with the whole current mempool again.
 //! - Each full transaction is cut down to its `CompactTx` form, so mempool
-//!   events carry the same `compact_tx` field that mined ones do.
+//!   events carry the same `compact_tx` field that mined ones do. The full
+//!   form is kept only while its chunk is scanned, to decrypt the memos of
+//!   matched outputs for webhooks (spec §4.5).
 //! - The current mempool is kept, in compact form, so a lease that starts
 //!   mid-block is checked against it too (see [`crate::scanner::backfill`]).
 
@@ -20,7 +22,7 @@ use zcash_primitives::transaction::Transaction;
 use zcash_protocol::consensus::BranchId;
 
 use crate::AppState;
-use crate::scanner::{self, Match};
+use crate::scanner::{self, Match, Memo};
 
 /// Mempool transactions parsed and trial-decrypted together.
 const DECRYPT_CHUNK: usize = 32;
@@ -32,7 +34,20 @@ const REOPEN_DELAY: Duration = Duration::from_secs(1);
 /// Parses a full transaction and keeps what trial decryption needs, as a
 /// `CompactTx`. `None` if it doesn't parse.
 pub fn to_compact(raw: &[u8], branch: BranchId) -> Option<CompactTx> {
+    parse(raw, branch).map(|(compact, _)| compact)
+}
+
+/// A mempool transaction in compact form, with its full form when it came
+/// from the stream.
+type Parsed = (Arc<CompactTx>, Option<Transaction>);
+
+fn parse(raw: &[u8], branch: BranchId) -> Option<(CompactTx, Transaction)> {
     let tx = Transaction::read(raw, branch).ok()?;
+    let compact = compact_of(&tx);
+    Some((compact, tx))
+}
+
+fn compact_of(tx: &Transaction) -> CompactTx {
     let mut out = CompactTx {
         txid: tx.txid().as_ref().to_vec(),
         ..CompactTx::default()
@@ -73,60 +88,87 @@ pub fn to_compact(raw: &[u8], branch: BranchId) -> Option<CompactTx> {
     if let Some(bundle) = tx.ironwood_bundle() {
         out.ironwood_actions = compact_actions(bundle);
     }
-    Some(out)
+    out
 }
 
 /// Bytes of note ciphertext in compact form (ZIP 307).
 const COMPACT_NOTE_SIZE: usize = 52;
 
-fn compact_batch(raw: Vec<Vec<u8>>, branch: BranchId) -> (Vec<Arc<CompactTx>>, usize) {
+/// Parses a batch from the stream. Returns the transactions that parsed
+/// and how many didn't.
+fn parse_batch(raw: Vec<Vec<u8>>, branch: BranchId) -> (Vec<Parsed>, usize) {
     let mut failed = 0usize;
-    let compact = raw
+    let parsed = raw
         .into_iter()
         .filter_map(|data| {
-            to_compact(&data, branch).map(Arc::new).or_else(|| {
+            let parsed = parse(&data, branch).map(|(c, full)| (Arc::new(c), Some(full)));
+            if parsed.is_none() {
                 failed += 1;
-                None
-            })
+            }
+            parsed
         })
         .collect();
-    (compact, failed)
+    (parsed, failed)
 }
 
-/// Checks one mempool transaction against every active lease. Used by tests.
+/// Parses and scans full transactions as the stream does, memos included.
+/// Returns how many didn't parse.
+pub async fn scan_raw(state: &Arc<AppState>, raw: Vec<Vec<u8>>, branch: BranchId) -> usize {
+    let (parsed, failed) = tokio::task::spawn_blocking(move || parse_batch(raw, branch))
+        .await
+        .unwrap_or((vec![], 0));
+    scan_chunk_at(state, parsed, SystemTime::now()).await;
+    failed
+}
+
+/// Checks one mempool transaction in compact form (so without memos)
+/// against every active lease. Used by tests.
 pub async fn scan_tx(state: &Arc<AppState>, tx: CompactTx) {
     scan_tx_at(state, tx, SystemTime::now()).await;
 }
 
 /// Like [`scan_tx`], with a fixed clock for rate-limit tests.
 pub async fn scan_tx_at(state: &Arc<AppState>, tx: CompactTx, now: SystemTime) {
-    scan_chunk_at(state, vec![Arc::new(tx)], now).await;
+    scan_chunk_at(state, vec![(Arc::new(tx), None)], now).await;
 }
 
-async fn scan_chunk(state: &Arc<AppState>, txs: Vec<Arc<CompactTx>>) {
-    scan_chunk_at(state, txs, SystemTime::now()).await;
-}
-
-async fn scan_chunk_at(state: &Arc<AppState>, txs: Vec<Arc<CompactTx>>, now: SystemTime) {
+async fn scan_chunk_at(state: &Arc<AppState>, txs: Vec<Parsed>, now: SystemTime) {
     if txs.is_empty() {
         return;
     }
     let leases = state.scanner.active_keys(now);
-    let chunk = Arc::new(txs);
-    let per_tx = if leases.is_empty() {
+    let chunk: Vec<Arc<CompactTx>> = txs.iter().map(|(c, _)| c.clone()).collect();
+    let found: Vec<(Match, Option<Memo>)> = if leases.is_empty() {
         vec![]
     } else {
-        let chunk2 = chunk.clone();
+        // Memos only go in webhook deliveries; keep none for accounts
+        // without a webhook (spec §4.5).
+        let with_webhook: std::collections::HashSet<_> = leases
+            .iter()
+            .map(|(account, _)| *account)
+            .filter(|account| state.store.has_webhook(*account))
+            .collect();
         tokio::task::spawn_blocking(move || {
-            let refs: Vec<&CompactTx> = chunk2.iter().map(|t| t.as_ref()).collect();
+            let refs: Vec<&CompactTx> = txs.iter().map(|(c, _)| c.as_ref()).collect();
             scanner::trial_decrypt_txs_refs(&refs, &leases)
+                .into_iter()
+                .map(|m| {
+                    let memo = txs[m.tx]
+                        .1
+                        .as_ref()
+                        .filter(|_| with_webhook.contains(&m.account))
+                        .and_then(|full| scanner::memo_of(full, &m, &leases));
+                    (m, memo)
+                })
+                .collect()
         })
         .await
         .unwrap_or_default()
     };
-    let mut by_tx: std::collections::HashMap<usize, Vec<Match>> = Default::default();
-    for m in per_tx {
-        by_tx.entry(m.tx).or_default().push(m);
+    let mut by_tx: std::collections::HashMap<usize, Vec<(Match, Option<Memo>)>> =
+        Default::default();
+    for (m, memo) in found {
+        by_tx.entry(m.tx).or_default().push((m, memo));
     }
     let mut new_all = Vec::new();
     for (i, tx) in chunk.iter().enumerate() {
@@ -134,7 +176,7 @@ async fn scan_chunk_at(state: &Arc<AppState>, txs: Vec<Arc<CompactTx>>, now: Sys
         let new = if matches.is_empty() {
             vec![]
         } else {
-            state.scanner.record_mempool(tx, &matches, now)
+            state.scanner.record_mempool(tx, matches, now)
         };
         state.scanner.mempool_insert(tx.clone());
         new_all.extend(new);
@@ -177,23 +219,11 @@ pub async fn run(state: Arc<AppState>) {
                 }
                 batch_raw.push(raw.data);
                 if batch_raw.len() >= DECRYPT_CHUNK {
-                    let raw = std::mem::take(&mut batch_raw);
-                    let (compact, failed) =
-                        tokio::task::spawn_blocking(move || compact_batch(raw, branch))
-                            .await
-                            .unwrap_or((vec![], 0));
-                    unparsed += failed;
-                    scan_chunk(&state, compact).await;
+                    unparsed += scan_raw(&state, std::mem::take(&mut batch_raw), branch).await;
                 }
             }
             if !batch_raw.is_empty() {
-                let raw = std::mem::take(&mut batch_raw);
-                let (compact, failed) =
-                    tokio::task::spawn_blocking(move || compact_batch(raw, branch))
-                        .await
-                        .unwrap_or((vec![], 0));
-                unparsed += failed;
-                scan_chunk(&state, compact).await;
+                unparsed += scan_raw(&state, std::mem::take(&mut batch_raw), branch).await;
             }
             if unparsed > 0 {
                 tracing::warn!(unparsed, "mempool transactions that didn't parse");

@@ -204,6 +204,8 @@ pub struct WebhookDelivery {
     pub txid: String,
     pub pool: Pool,
     pub amount: u64,
+    /// The whole 512-byte memo field, unpadded base64url; read it as ZIP
+    /// 302 says. `None` when the server had no full ciphertext for it.
     pub memo: Option<String>,
 }
 

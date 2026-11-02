@@ -169,6 +169,16 @@ pub fn block(height: u64, vtx: Vec<CompactTx>) -> CompactBlock {
 /// payments land in Sapling or Ironwood. Orchard and Ironwood actions are
 /// parsed by the same code.
 pub fn full_tx(to: &Wallet, sapling_out: bool, ironwood_out: bool) -> Vec<u8> {
+    full_tx_with_memo(to, sapling_out, ironwood_out, [0; 512])
+}
+
+/// [`full_tx`] with `memo` in each output.
+pub fn full_tx_with_memo(
+    to: &Wallet,
+    sapling_out: bool,
+    ironwood_out: bool,
+    memo: [u8; 512],
+) -> Vec<u8> {
     use orchard::builder::{Builder as OBuilder, BundleType as OBundleType};
     use orchard::bundle::{Authorized as OAuthorized, BundleVersion};
     use orchard::primitives::redpallas;
@@ -187,7 +197,7 @@ pub fn full_tx(to: &Wallet, sapling_out: bool, ironwood_out: bool) -> Vec<u8> {
             orchard::Anchor::empty_tree(),
         )
         .unwrap();
-        b.add_output(None, to.orchard, NoteValue::from_raw(5_000), [0; 512])
+        b.add_output(None, to.orchard, NoteValue::from_raw(5_000), memo)
             .unwrap();
         let (bundle, _) = b.build::<ZatBalance>(&mut *rng).unwrap().unwrap();
         // Parsers check that the proof has its canonical size.
@@ -218,7 +228,7 @@ pub fn full_tx(to: &Wallet, sapling_out: bool, ironwood_out: bool) -> Vec<u8> {
             None,
             to.sapling,
             sapling::value::NoteValue::from_raw(7_000),
-            [0; 512],
+            memo,
         )
         .unwrap();
         let (bundle, _) = b

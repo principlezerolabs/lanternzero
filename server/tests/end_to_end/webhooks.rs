@@ -17,7 +17,7 @@ use tokio::sync::Semaphore;
 use super::harness::{Captured, Harness, harness_full, receiver};
 use super::scanning::{eventually, sync_tip};
 use crate::common::fake_lwd;
-use crate::common::wallet::{Wallet, action, block, tx};
+use crate::common::wallet::{self, Wallet, action, block, tx};
 
 struct Shop {
     h: Harness,
@@ -102,6 +102,34 @@ impl Shop {
 fn deliveries(c: &Captured) -> usize {
     c.0.lock().unwrap().len()
 }
+
+/// The bodies delivered so far, parsed.
+fn bodies(c: &Captured) -> Vec<Value> {
+    c.0.lock()
+        .unwrap()
+        .iter()
+        .map(|(_, body)| serde_json::from_slice(body).unwrap())
+        .collect()
+}
+
+/// A ZIP 302 text memo.
+fn text_memo(text: &str) -> [u8; 512] {
+    let mut memo = [0u8; 512];
+    memo[..text.len()].copy_from_slice(text.as_bytes());
+    memo
+}
+
+fn memo_of(delivery: &Value) -> Option<Vec<u8>> {
+    use base64::Engine as _;
+    let b64 = delivery["memo"].as_str()?;
+    Some(
+        base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(b64)
+            .unwrap(),
+    )
+}
+
+const BRANCH: zcash_protocol::consensus::BranchId = zcash_protocol::consensus::BranchId::Nu6_3;
 
 #[tokio::test]
 async fn deliveries_are_signed_follow_each_change_and_end_when_final() {
@@ -299,4 +327,114 @@ async fn a_merchant_sets_and_deletes_its_webhook_through_the_client_core() {
         .unwrap();
     c.finish_delete_webhook(p, r.as_response()).unwrap();
     assert!(s.h.state.store.webhooks().is_empty());
+}
+
+#[tokio::test]
+async fn mempool_payments_carry_their_memo_to_the_final_delivery() {
+    let mut s = shop().await;
+    let (url, got) = receiver(StatusCode::OK).await;
+    s.put_webhook(&url).await;
+    s.lease().await;
+    let memo = text_memo("order 42");
+    let raw = wallet::full_tx_with_memo(&s.alice, true, true, memo);
+    assert_eq!(
+        lz_server::mempool::scan_raw(&s.h.state, vec![raw.clone()], BRANCH).await,
+        0
+    );
+
+    s.deliver(SystemTime::now());
+    eventually(|| deliveries(&got) == 2).await;
+    let mut pools = Vec::new();
+    for d in bodies(&got) {
+        assert_eq!(d["status"], "mempool");
+        assert_eq!(memo_of(&d).as_deref(), Some(&memo[..]), "the whole field");
+        pools.push(d["pool"].as_str().unwrap().to_owned());
+    }
+    pools.sort();
+    assert_eq!(pools, ["ironwood", "sapling"]);
+    // Not in what wallets fetch: they get their own memos (spec §6.3).
+    let page = s.h.state.scanner.page(s.account, None, 3500);
+    assert!(
+        !serde_json::to_string(&page.events)
+            .unwrap()
+            .contains("memo")
+    );
+
+    // Mined from a compact block, which has no memo: the event keeps it.
+    let mut mined = lz_server::mempool::to_compact(&raw, BRANCH).unwrap();
+    mined.index = 1;
+    lz_server::scanner::scan_block(&s.h.state, Arc::new(block(101, vec![mined]))).await;
+    s.h.state.scanner.on_tip(100 + u64::from(FINALITY_DEPTH));
+    s.deliver(SystemTime::now());
+    eventually(|| deliveries(&got) == 4).await;
+    for d in &bodies(&got)[2..] {
+        assert_eq!(d["status"], "mined");
+        assert_eq!(memo_of(d).as_deref(), Some(&memo[..]));
+    }
+    // Final and delivered: the events, memos with them, are gone.
+    eventually(|| {
+        s.h.state
+            .scanner
+            .page(s.account, None, 3500)
+            .events
+            .is_empty()
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn a_memo_learned_later_waits_for_the_next_state() {
+    let mut s = shop().await;
+    let (url, got) = receiver(StatusCode::OK).await;
+    s.put_webhook(&url).await;
+    s.lease().await;
+    let memo = text_memo("invoice 7");
+    let raw = wallet::full_tx_with_memo(&s.alice, false, true, memo);
+    let compact = lz_server::mempool::to_compact(&raw, BRANCH).unwrap();
+
+    // Seen first in compact form (as a backfill sees the mempool): no memo.
+    lz_server::mempool::scan_tx(&s.h.state, compact.clone()).await;
+    s.deliver(SystemTime::now());
+    eventually(|| deliveries(&got) == 1).await;
+    assert_eq!(bodies(&got)[0]["memo"], Value::Null);
+
+    // Then in full, as the stream sends it: no delivery for the memo alone.
+    lz_server::mempool::scan_raw(&s.h.state, vec![raw], BRANCH).await;
+    s.deliver(SystemTime::now());
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(deliveries(&got), 1);
+
+    // The next state carries it.
+    let mut mined = compact;
+    mined.index = 1;
+    lz_server::scanner::scan_block(&s.h.state, Arc::new(block(101, vec![mined]))).await;
+    s.deliver(SystemTime::now());
+    eventually(|| deliveries(&got) == 2).await;
+    let d = &bodies(&got)[1];
+    assert_eq!(d["status"], "mined");
+    assert_eq!(memo_of(d).as_deref(), Some(&memo[..]));
+}
+
+#[tokio::test]
+async fn accounts_without_a_webhook_keep_no_memo() {
+    let mut s = shop().await;
+    s.lease().await;
+    let raw = wallet::full_tx_with_memo(&s.alice, false, true, text_memo("not kept"));
+    lz_server::mempool::scan_raw(&s.h.state, vec![raw.clone()], BRANCH).await;
+    assert_eq!(
+        s.h.state.scanner.page(s.account, None, 3500).events.len(),
+        1
+    );
+
+    // A webhook set afterwards gets the payment, but not a memo the
+    // server never kept.
+    let (url, got) = receiver(StatusCode::OK).await;
+    s.put_webhook(&url).await;
+    let mut mined = lz_server::mempool::to_compact(&raw, BRANCH).unwrap();
+    mined.index = 1;
+    lz_server::scanner::scan_block(&s.h.state, Arc::new(block(101, vec![mined]))).await;
+    s.deliver(SystemTime::now());
+    eventually(|| deliveries(&got) == 1).await;
+    assert_eq!(bodies(&got)[0]["status"], "mined");
+    assert_eq!(bodies(&got)[0]["memo"], Value::Null);
 }

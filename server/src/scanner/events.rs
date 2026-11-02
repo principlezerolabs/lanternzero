@@ -92,6 +92,7 @@ impl Scanner {
                                 txid,
                                 pool: m.pool,
                                 value: m.value,
+                                memo: None,
                             },
                             delivery: webhooks::Delivery::default(),
                         },
@@ -104,13 +105,15 @@ impl Scanner {
         new
     }
 
-    /// Records matches in a mempool transaction as `mempool` events. Returns
-    /// the new ones, for alerts. An event already known keeps its status,
-    /// except that a `reorged` one moves back to `mempool` (spec §4.3).
+    /// Records matches in a mempool transaction as `mempool` events, each
+    /// with its memo if the full transaction gave one. Returns the new
+    /// events, for alerts. An event already known keeps its status, except
+    /// that a `reorged` one moves back to `mempool` (spec §4.3), and gains
+    /// a memo it lacked (§4.5).
     pub fn record_mempool(
         &self,
         tx: &CompactTx,
-        matches: &[Match],
+        matches: Vec<(Match, Option<Memo>)>,
         now: SystemTime,
     ) -> Vec<(AccountId, Event)> {
         let Ok(txid) = <[u8; 32]>::try_from(&tx.txid[..]) else {
@@ -118,7 +121,7 @@ impl Scanner {
         };
         let mut new = Vec::new();
         let mut inner = self.lock();
-        for m in matches {
+        for (m, memo) in matches {
             if inner
                 .leases
                 .get(&m.account)
@@ -129,14 +132,20 @@ impl Scanner {
             let id = event_id(&self.secret[..], &m.account, &txid, m.pool, m.index);
             let acct = inner.events.entry(m.account).or_default();
             match acct.by_id.get_mut(&id) {
-                Some(s) if s.event.status == EventStatus::Reorged => {
-                    s.event.status = EventStatus::Mempool;
-                    s.event.rev += 1;
-                    acct.last_seq += 1;
-                    s.seq = acct.last_seq;
-                    s.json_len = json_len(&s.event);
+                Some(s) => {
+                    if s.payment.memo.is_none() {
+                        // Goes out with the event's next state, not as a
+                        // delivery of its own.
+                        s.payment.memo = memo;
+                    }
+                    if s.event.status == EventStatus::Reorged {
+                        s.event.status = EventStatus::Mempool;
+                        s.event.rev += 1;
+                        acct.last_seq += 1;
+                        s.seq = acct.last_seq;
+                        s.json_len = json_len(&s.event);
+                    }
                 }
-                Some(_) => {}
                 None => {
                     let event = Event {
                         id: id.clone(),
@@ -161,6 +170,7 @@ impl Scanner {
                                 txid,
                                 pool: m.pool,
                                 value: m.value,
+                                memo,
                             },
                             delivery: webhooks::Delivery::default(),
                         },

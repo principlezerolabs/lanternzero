@@ -29,6 +29,8 @@ pub(super) struct Payment {
     pub(super) txid: [u8; 32],
     pub(super) pool: Pool,
     pub(super) value: u64,
+    /// Known only for payments seen in full in the mempool (spec §4.5).
+    pub(super) memo: Option<Memo>,
 }
 
 #[derive(Default)]
@@ -134,10 +136,14 @@ impl Scanner {
                     txid: txid_hex(&s.payment.txid),
                     pool: s.payment.pool,
                     amount: s.payment.value,
-                    // Compact blocks carry no memo, and fetching the full
-                    // transaction by txid would show which one matters
-                    // (invariant 7).
-                    memo: None,
+                    // Only from the mempool's full transactions: compact
+                    // blocks carry no memo, and fetching the transaction
+                    // by txid would show which one matters (invariant 7).
+                    memo: s
+                        .payment
+                        .memo
+                        .as_ref()
+                        .map(|m| URL_SAFE_NO_PAD.encode(m.as_bytes())),
                 },
             });
         }

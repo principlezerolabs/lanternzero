@@ -6,6 +6,8 @@ use lz_proto::event_id::Pool;
 use zcash_client_backend::proto::compact_formats::{CompactBlock, CompactOrchardAction, CompactTx};
 use zcash_note_encryption::EphemeralKeyBytes;
 use zcash_note_encryption::batch::try_compact_note_decryption;
+use zcash_primitives::transaction::Transaction;
+use zeroize::Zeroizing;
 
 use crate::store::AccountId;
 use crate::viewkey::ScanKeys;
@@ -32,6 +34,73 @@ impl std::fmt::Debug for Match {
             .field("index", &self.index)
             .finish_non_exhaustive()
     }
+}
+
+/// Bytes in a memo field (ZIP 302).
+pub const MEMO_LEN: usize = 512;
+
+/// A note's whole memo field, for webhooks (spec §4.5). Derived from a
+/// key: memory only, zeroed on drop, and `Debug` hides it (invariant 3).
+pub struct Memo(Box<Zeroizing<[u8; MEMO_LEN]>>);
+
+impl std::fmt::Debug for Memo {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Memo(<redacted>)")
+    }
+}
+
+impl Memo {
+    pub fn as_bytes(&self) -> &[u8; MEMO_LEN] {
+        &self.0
+    }
+
+    /// Moves `raw` to the heap and zeroes the copy passed in.
+    fn new(mut raw: [u8; MEMO_LEN]) -> Self {
+        let mut boxed = Box::new(Zeroizing::new([0u8; MEMO_LEN]));
+        boxed.copy_from_slice(&raw);
+        zeroize::Zeroize::zeroize(&mut raw);
+        Self(boxed)
+    }
+}
+
+/// The memo of the output `m` found in `tx`, from its full ciphertext
+/// (spec §4.5). `tx` is the full form of the transaction `m` was matched
+/// in, and `leases` the keys it was matched with. `None` if no key of the
+/// account opens that output, or the note isn't the one matched.
+pub fn memo_of(tx: &Transaction, m: &Match, leases: &[(AccountId, Arc<ScanKeys>)]) -> Option<Memo> {
+    use orchard::note_encryption::{IronwoodDomain, OrchardDomain};
+    use sapling::note_encryption::{Zip212Enforcement, try_sapling_note_decryption};
+    use zcash_note_encryption::try_note_decryption;
+
+    let keys = &leases.iter().find(|(a, _)| *a == m.account)?.1;
+    let index = m.index as usize;
+    let (value, memo) = match m.pool {
+        Pool::Sapling => {
+            let out = tx.sapling_bundle()?.shielded_outputs().get(index)?;
+            keys.sapling.iter().find_map(|ivk| {
+                try_sapling_note_decryption(ivk, out, Zip212Enforcement::On)
+                    .map(|(note, _, memo)| (note.value().inner(), memo))
+            })?
+        }
+        Pool::Orchard => {
+            let act = tx.orchard_bundle()?.actions().get(index)?;
+            let domain = OrchardDomain::for_action(act);
+            keys.orchard.iter().find_map(|ivk| {
+                try_note_decryption(&domain, ivk, act)
+                    .map(|(note, _, memo)| (note.value().inner(), memo))
+            })?
+        }
+        Pool::Ironwood => {
+            let act = tx.ironwood_bundle()?.actions().get(index)?;
+            let domain = IronwoodDomain::for_action(act);
+            keys.orchard.iter().find_map(|ivk| {
+                try_note_decryption(&domain, ivk, act)
+                    .map(|(note, _, memo)| (note.value().inner(), memo))
+            })?
+        }
+    };
+    let memo = Memo::new(memo);
+    (value == m.value).then_some(memo)
 }
 
 /// Trial-decrypts every shielded output in `block` with each lease's keys.
@@ -168,4 +237,16 @@ fn compact_action(act: &CompactOrchardAction) -> Option<orchard::note_encryption
     Some(orchard::note_encryption::CompactAction::from_parts(
         nf, cmx, epk, ct,
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn memos_stay_hidden() {
+        let memo = Memo::new([b'x'; MEMO_LEN]);
+        assert_eq!(format!("{memo:?}"), "Memo(<redacted>)");
+        assert_eq!(memo.as_bytes(), &[b'x'; MEMO_LEN]);
+    }
 }

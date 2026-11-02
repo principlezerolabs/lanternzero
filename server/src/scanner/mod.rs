@@ -34,8 +34,8 @@ mod live;
 mod release;
 mod webhooks;
 
-pub(crate) use decrypt::trial_decrypt_txs_refs;
-pub use decrypt::{Match, trial_decrypt, trial_decrypt_txs};
+pub use decrypt::{MEMO_LEN, Match, Memo, trial_decrypt, trial_decrypt_txs};
+pub(crate) use decrypt::{memo_of, trial_decrypt_txs_refs};
 pub use live::{
     PAYMENT_PUSHES_PER_MINUTE, alert, backfill, run, scan_block, scan_block_at, scan_blocks,
     scan_blocks_at, sweep_loop,
