@@ -81,8 +81,9 @@ Self-hosted servers on Tor don't need one.
 - **Building a wallet integration:** the Rust [client core](client/README.md),
   which wallet SDKs compile into their own native library; the reference
   [push gateway](gateway/README.md); and the [protocol spec](spec/v0.md).
-- **Merchant backends:** webhooks for payment notifications are being built;
-  see the spec, §4.5.
+- **Merchant backends:** webhooks for payment notifications (spec §4.5).
+  The client core sets one up, and `lz-proto` checks each delivery's
+  signature.
 
 A hosted service from Principle Zero Labs is planned for people who would
 rather not run a server. Self-hosting stays a first-class path: everything a
