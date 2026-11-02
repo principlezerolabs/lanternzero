@@ -28,14 +28,19 @@ pub const OHTTP_RESPONSE_TYPE: &str = "message/ohttp-res";
 pub enum KeyConfigError {
     /// The two sources served different configurations: the server may
     /// be tagging this user, or rotating while one source is behind
-    /// (spec §3.2). If one copy matches the configuration in use, keep
-    /// using it and check again after the source's refresh interval (at
-    /// most 24 hours); if they still differ, stop using the server and
-    /// tell the user.
+    /// (spec §3.2). From [`KeyConfig::from_two_sources`], there is nothing
+    /// to use yet. From [`Client::check_key_config`](crate::Client::check_key_config),
+    /// which already kept the configuration in use while that was allowed,
+    /// it means stop: the client builds no more requests until the sources
+    /// agree, and the app should tell the user.
     #[error("the two sources returned different key configurations")]
     Mismatch,
     #[error("not a valid OHTTP key configuration")]
     Invalid,
+    /// The client uses Tor ([`Transport::Onion`]), which has no key
+    /// configuration.
+    #[error("not an OHTTP client")]
+    NotOhttp,
 }
 
 /// A server's OHTTP key configuration (`application/ohttp-keys`), checked

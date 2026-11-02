@@ -24,7 +24,8 @@
 //!   the next request (spec §4.2–4.4);
 //! - only reporting events that are new or changed;
 //! - the network, version, and key-configuration checks on `info`
-//!   (spec §3.2, §4.7);
+//!   (spec §3.2, §4.7), and what to do when two key-configuration
+//!   sources disagree ([`Client::check_key_config`]);
 //! - decrypting pings on the device ([`PushReceiver`]).
 //!
 //! What stays with the app: storing the connection URL and the
@@ -41,9 +42,9 @@ pub mod push;
 pub mod transport;
 
 pub use client::{
-    Client, ClientState, InfoOutcome, LONG_POLL_WAIT_SECS, PendingDeleteAccount,
-    PendingDeleteWebhook, PendingEvents, PendingInfo, PendingRegister, PendingRotate,
-    PendingSetWebhook, PendingUnregister, PendingWake, PollOutcome, WakeOutcome,
+    Client, ClientState, InfoOutcome, KEY_MISMATCH_GRACE_MS, KeyCheck, LONG_POLL_WAIT_SECS,
+    PendingDeleteAccount, PendingDeleteWebhook, PendingEvents, PendingInfo, PendingRegister,
+    PendingRotate, PendingSetWebhook, PendingUnregister, PendingWake, PollOutcome, WakeOutcome,
 };
 pub use lz_proto;
 pub use push::{PushError, PushReceiver};
@@ -63,9 +64,9 @@ pub enum Error {
     #[error("relay answered {0}")]
     Relay(u16),
     /// The server no longer accepts the OHTTP key configuration in use,
-    /// for example a week after it rotated (spec §3.2). Fetch it again
-    /// ([`KeyConfig::from_two_sources`]), [`Client::set_key_config`], and
-    /// build the request again.
+    /// for example a week after it rotated (spec §3.2). Fetch it again from
+    /// both sources, [`Client::check_key_config`], and build the request
+    /// again.
     #[error("the server no longer accepts this OHTTP key configuration")]
     KeyConfigRejected,
     /// The response couldn't be decrypted, wasn't the fixed size, or wasn't
@@ -121,9 +122,17 @@ pub enum Error {
     #[error("server does not speak protocol v0")]
     UnsupportedVersion,
     /// `info` names a different OHTTP key configuration than the one in
-    /// use: fetch it again ([`KeyConfig::from_two_sources`], spec §3.2).
+    /// use: fetch it again from both sources and
+    /// [`Client::check_key_config`] (spec §3.2).
     #[error("server's OHTTP key configuration changed")]
     KeyConfigChanged,
+    /// The key-configuration sources disagreed for good
+    /// ([`Client::check_key_config`], spec §3.2): the server may be
+    /// tagging this user, so no request is built. Tell the user; a later
+    /// check that finds the sources in agreement lifts it, and says so
+    /// (`KeyCheck::Agreed { recovered: true, .. }`).
+    #[error("key configuration sources disagree; not using this server")]
+    KeyConfigInconsistent,
     /// [`Transport::Onion`] is only for `.onion` servers.
     #[error("Tor transport needs a .onion server")]
     OnionOnly,

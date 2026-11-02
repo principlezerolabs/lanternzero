@@ -11,8 +11,8 @@ use lz_client::lz_proto::padding::{REQUEST_SIZE, RESPONSE_SIZE, pad_bhttp};
 use lz_client::lz_proto::token::AccountToken;
 use lz_client::lz_proto::url::ConnectionUrl;
 use lz_client::{
-    Client, ClientState, Error, HttpRequest, HttpResponse, KeyConfig, KeyConfigError,
-    LONG_POLL_WAIT_SECS, Transport,
+    Client, ClientState, Error, HttpRequest, HttpResponse, KEY_MISMATCH_GRACE_MS, KeyCheck,
+    KeyConfig, KeyConfigError, LONG_POLL_WAIT_SECS, Transport,
 };
 use ohttp::hpke::{Aead, Kdf, Kem};
 use serde_json::{Value, json};
@@ -549,6 +549,118 @@ fn key_configs_must_match_across_sources() {
 }
 
 #[test]
+fn sources_that_agree_switch_the_key_config() {
+    let a = Gateway::new(1);
+    let b = Gateway::new(2);
+    let mut c = registered(&a);
+    assert_eq!(
+        c.check_key_config(NOW, &a.keys, &a.keys),
+        Ok(KeyCheck::Agreed {
+            changed: false,
+            recovered: false
+        })
+    );
+    // A rotation both sources have seen: requests now go to the new key.
+    assert_eq!(
+        c.check_key_config(NOW, &b.keys, &b.keys),
+        Ok(KeyCheck::Agreed {
+            changed: true,
+            recovered: false
+        })
+    );
+    let p = c.wake(NOW, None).unwrap();
+    assert_eq!(b.receive(p.request()).path, "/base/v0/wake");
+    assert_eq!(
+        c.check_key_config(NOW, b"junk", b"junk"),
+        Err(KeyConfigError::Invalid)
+    );
+}
+
+#[test]
+fn failed_fetches_change_nothing() {
+    let a = Gateway::new(1);
+    let mut c = registered(&a);
+    // Two different error pages, or one: not a disagreement.
+    for (first, second) in [
+        (&b"<html>portal</html>"[..], &b"<html>login</html>"[..]),
+        (&a.keys[..], &b"<html>portal</html>"[..]),
+    ] {
+        assert_eq!(
+            c.check_key_config(NOW, first, second),
+            Err(KeyConfigError::Invalid)
+        );
+    }
+    assert_eq!(c.state().key_mismatch_since_ms, None);
+    assert!(!c.state().key_config_refused);
+    let p = c.wake(NOW, None).unwrap();
+    assert_eq!(a.receive(p.request()).path, "/base/v0/wake");
+}
+
+#[test]
+fn a_source_behind_is_tolerated_for_a_day_then_the_server_is_refused() {
+    let a = Gateway::new(1);
+    let b = Gateway::new(2);
+    let mut c = registered(&a);
+
+    // One copy is the configuration in use: keep it, and check again.
+    let kept = Ok(KeyCheck::Kept {
+        check_again_at_ms: NOW + KEY_MISMATCH_GRACE_MS,
+    });
+    assert_eq!(c.check_key_config(NOW, &a.keys, &b.keys), kept);
+    assert_eq!(c.check_key_config(NOW + 3_600_000, &b.keys, &a.keys), kept);
+    let p = c.wake(NOW, None).unwrap();
+    assert_eq!(a.receive(p.request()).path, "/base/v0/wake");
+
+    // The deadline survives a restart, through the persisted state.
+    let state = c.state().clone();
+    assert_eq!(state.key_mismatch_since_ms, Some(NOW));
+    let mut c = client(&a, state);
+    assert_eq!(
+        c.check_key_config(NOW + KEY_MISMATCH_GRACE_MS, &a.keys, &b.keys),
+        Err(KeyConfigError::Mismatch)
+    );
+    assert!(c.state().key_config_refused);
+    assert_eq!(c.wake(NOW, None).unwrap_err(), Error::KeyConfigInconsistent);
+    assert_eq!(c.info(NOW).unwrap_err(), Error::KeyConfigInconsistent);
+    // Once refused, a copy matching the one in use doesn't lift it...
+    assert_eq!(
+        c.check_key_config(NOW + KEY_MISMATCH_GRACE_MS + 1, &a.keys, &b.keys),
+        Err(KeyConfigError::Mismatch)
+    );
+    // ...but sources that agree again do.
+    assert_eq!(
+        c.check_key_config(NOW + KEY_MISMATCH_GRACE_MS + 2, &a.keys, &a.keys),
+        Ok(KeyCheck::Agreed {
+            changed: false,
+            recovered: true
+        })
+    );
+    assert_eq!(c.state().key_mismatch_since_ms, None);
+    assert!(!c.state().key_config_refused);
+    c.wake(NOW, None).unwrap();
+    assert_eq!(
+        c.check_key_config(NOW + KEY_MISMATCH_GRACE_MS + 3, &a.keys, &a.keys),
+        Ok(KeyCheck::Agreed {
+            changed: false,
+            recovered: false
+        })
+    );
+}
+
+#[test]
+fn sources_that_differ_from_each_other_and_the_config_in_use_refuse_at_once() {
+    let a = Gateway::new(1);
+    let b = Gateway::new(2);
+    let other = Gateway::new(3);
+    let mut c = registered(&a);
+    assert_eq!(
+        c.check_key_config(NOW, &b.keys, &other.keys),
+        Err(KeyConfigError::Mismatch)
+    );
+    assert_eq!(c.wake(NOW, None).unwrap_err(), Error::KeyConfigInconsistent);
+}
+
+#[test]
 fn onion_requests_go_direct_and_secrets_stay_out_of_debug() {
     let text = token().encode().to_string();
     let clear = ConnectionUrl::parse(&format!("lanternzero://lz.example#{text}")).unwrap();
@@ -574,6 +686,12 @@ fn onion_requests_go_direct_and_secrets_stay_out_of_debug() {
         },
     )
     .unwrap();
+    // Tor has no key configuration to check.
+    let a = Gateway::new(1);
+    assert_eq!(
+        c.check_key_config(NOW, &a.keys, &a.keys),
+        Err(KeyConfigError::NotOhttp)
+    );
     let key = uivk();
     let p = c.wake(NOW, Some(lease(vec![&key], false))).unwrap();
     let req = p.request();

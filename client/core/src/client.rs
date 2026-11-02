@@ -17,7 +17,9 @@ use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
 use crate::Error;
-use crate::transport::{self, HttpRequest, HttpResponse, Inner, KeyConfig, Opener, Transport};
+use crate::transport::{
+    self, HttpRequest, HttpResponse, Inner, KeyConfig, KeyConfigError, Opener, Transport,
+};
 
 /// The `wait` of a regular long-poll (spec §4.3: the server clamps to
 /// 25–30 s). The app's HTTP timeout must be longer than this plus the
@@ -47,6 +49,40 @@ pub struct ClientState {
     /// every `Date` sent.
     #[serde(default)]
     pub clock_offset_ms: i64,
+    /// When two key-configuration sources first disagreed (spec §3.2), on
+    /// this device's clock; cleared once they agree. See
+    /// [`Client::check_key_config`].
+    #[serde(default)]
+    pub key_mismatch_since_ms: Option<u64>,
+    /// The sources disagreed for good (spec §3.2): no request is built
+    /// ([`Error::KeyConfigInconsistent`]) until they agree again.
+    #[serde(default)]
+    pub key_config_refused: bool,
+}
+
+/// How long two key-configuration sources may disagree while one matches
+/// the configuration in use: a mirror refreshes at least this often
+/// (spec §3.2).
+pub const KEY_MISMATCH_GRACE_MS: u64 = 24 * 3600 * 1000;
+
+/// What [`Client::check_key_config`] decided.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeyCheck {
+    /// Both sources served the same configuration, now in use.
+    /// - `changed`: it replaced another (a rotation); cache the new
+    ///   [`KeyConfig::encoded`].
+    /// - `recovered`: the client had refused the server
+    ///   ([`Error::KeyConfigInconsistent`]) and now uses it again. Tell
+    ///   the user the problem has cleared; a wallet that wants the user
+    ///   to decide can stop here and ask before sending more requests.
+    Agreed { changed: bool, recovered: bool },
+    /// The sources differ, but one matches the configuration in use: the
+    /// server may be rotating while a source is behind. It stays in use;
+    /// fetch from both sources again by `check_again_at_ms` (on this
+    /// device's clock, as passed in), earlier if a source refreshes
+    /// sooner. If they still differ at that time, the client stops using
+    /// the server.
+    Kept { check_again_at_ms: u64 },
 }
 
 /// One server connection.
@@ -219,11 +255,66 @@ impl Client {
         &self.url
     }
 
-    /// Replaces the key configuration after fetching it again (spec §3.2).
+    /// Replaces the key configuration with one the app checked itself
+    /// (spec §3.2). Prefer [`check_key_config`](Self::check_key_config),
+    /// which applies the rules for sources that disagree. This doesn't
+    /// lift [`Error::KeyConfigInconsistent`]; only sources that agree do.
     pub fn set_key_config(&mut self, config: KeyConfig) {
         if let Transport::Ohttp(c) = &mut self.transport {
             *c = config;
         }
+    }
+
+    /// Checks the key configuration as fetched again from two sources
+    /// that hide the device's IP address, run by different operators
+    /// (spec §3.2), and acts on the result. `first` and `second` are the
+    /// `application/ohttp-keys` bytes each source served, taken out of
+    /// whatever format a mirror wraps them in.
+    ///
+    /// - either copy doesn't parse: [`KeyConfigError::Invalid`], and
+    ///   nothing changes; a failed fetch is no sign of tagging, so fetch
+    ///   again;
+    /// - the copies match: that configuration is used from now on
+    ///   ([`KeyCheck::Agreed`]);
+    /// - they differ, one matches the configuration in use, and they
+    ///   haven't differed for [`KEY_MISMATCH_GRACE_MS`]: it stays in use
+    ///   ([`KeyCheck::Kept`]);
+    /// - otherwise, [`KeyConfigError::Mismatch`]: the server may be
+    ///   tagging this user. The client builds no more requests
+    ///   ([`Error::KeyConfigInconsistent`]) until a later check finds the
+    ///   sources in agreement. Tell the user.
+    ///
+    /// Call it at least once a day, whenever `info` reports
+    /// [`Error::KeyConfigChanged`], and after [`Error::KeyConfigRejected`].
+    /// Persist [`state`](Self::state) afterwards.
+    pub fn check_key_config(
+        &mut self,
+        now_unix_ms: u64,
+        first: &[u8],
+        second: &[u8],
+    ) -> Result<KeyCheck, KeyConfigError> {
+        let Transport::Ohttp(current) = &mut self.transport else {
+            return Err(KeyConfigError::NotOhttp);
+        };
+        let config = KeyConfig::from_cache(first)?;
+        KeyConfig::from_cache(second)?;
+        if first == second {
+            let changed = *current != config;
+            *current = config;
+            let recovered = std::mem::take(&mut self.state.key_config_refused);
+            self.state.key_mismatch_since_ms = None;
+            return Ok(KeyCheck::Agreed { changed, recovered });
+        }
+        let one_is_current = current.encoded() == first || current.encoded() == second;
+        let since = *self.state.key_mismatch_since_ms.get_or_insert(now_unix_ms);
+        let deadline = since.saturating_add(KEY_MISMATCH_GRACE_MS);
+        if one_is_current && !self.state.key_config_refused && now_unix_ms < deadline {
+            return Ok(KeyCheck::Kept {
+                check_again_at_ms: deadline,
+            });
+        }
+        self.state.key_config_refused = true;
+        Err(KeyConfigError::Mismatch)
     }
 
     /// Queues an acknowledgement for the next `wake` or poll. Only `mined`
@@ -613,6 +704,9 @@ impl Client {
         now_unix_ms: u64,
         body: Option<&[u8]>,
     ) -> Result<Exchange, Error> {
+        if self.state.key_config_refused && matches!(self.transport, Transport::Ohttp(_)) {
+            return Err(Error::KeyConfigInconsistent);
+        }
         let (request, opener) = transport::build(
             &self.transport,
             &self.url.base_url,
