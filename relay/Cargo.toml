@@ -1,0 +1,37 @@
+[package]
+name = "lz-relay"
+version = "0.0.1"
+description = "A small OHTTP relay for Lantern Zero gateways, for third parties to run"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+axum = "0.8"
+http = "1"
+# Only the purpose string and the fixed sizes, so the relay's caps can't
+# drift from the protocol.
+lz-proto = { path = "../crates/lz-proto" }
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "http2"] }
+serde = { version = "1", features = ["derive"] }
+thiserror = "2"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "net", "signal", "sync"] }
+toml = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# Already used by reqwest: hosts are read the way it reads them.
+url = "2.5"
+
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1.1", default-features = false, features = ["std", "process"] }
+
+[dev-dependencies]
+# The end-to-end test: the real server and client core through the relay.
+lz-client = { path = "../client/core" }
+lz-server = { path = "../server" }
+proptest = { version = "1.12", default-features = false, features = ["std"] }
+
+[lints]
+workspace = true

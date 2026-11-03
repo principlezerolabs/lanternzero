@@ -78,6 +78,7 @@ same copy. Treat a violation as a bug, and test for it.
 | `crates/lz-proto/` | Shared protocol types from the spec: requests and responses, padding, tokens, event ids, replay window. Test vectors in `spec/vectors/` |
 | `client/` | Rust client core for wallets (`client/core`, prototype): OHTTP requests, registration, wake and leases, long-poll, acknowledgements, ping decryption. No I/O: the host app sends the bytes. `client/uniffi`: Swift and Kotlin bindings over it for apps without a Rust core |
 | `deploy/` | Docker Compose self-host kit: profiles `full` (Zebra, Zaino, server, Tor) and `byo-node` (server and Tor, pointed at an existing node), with hardening for spec §6.2. Plan in `deploy/DESIGN.md` |
+| `relay/` | `lz-relay` (prototype): a small OHTTP relay for third parties to run. Forwards only to gateways that opt in to the Lantern Zero purpose, only `Content-Type`, nothing logged about clients. Design: `relay/DESIGN.md`, issue #9 |
 | `skill/` | Claude skill that guides and troubleshoots self-hosting. The Compose files and `lz-server init` do the installing; the skill runs `lz-server doctor` and never improvises configuration. |
 
 ## Technology
@@ -95,7 +96,7 @@ same copy. Treat a violation as a bug, and test for it.
   proposed upstream in payjoin/rust-payjoin#2026.
 - **Decided (2026-10-31):**
   - **Workspace:** one Cargo workspace (`crates/lz-proto`, `server`,
-    `gateway`, `client/core`, `client/uniffi`). Client-side crates
+    `gateway`, `relay`, `client/core`, `client/uniffi`). Client-side crates
     (`lz-proto`, the client core, its bindings) must not depend on
     `zcash_client_backend`, tokio, or a TLS stack.
   - **Minimum Rust (2026-11-01):** 1.89 for every crate, the same as

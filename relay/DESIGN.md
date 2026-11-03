@@ -1,6 +1,9 @@
 # relay: design
 
-**Status:** proposal (2026-11-03). Nothing is built yet. Tracking issue:
+**Status:** prototype (2026-11-03). The crate does what this page
+describes, with tests against a fake gateway and end to end with
+`lz-server` and `lz-client`. Not yet: the image, the Compose example
+with Caddy, and the operator README. Tracking issue:
 [#9](https://github.com/principlezerolabs/lanternzero/issues/9).
 
 `lz-relay` is a small OHTTP relay (RFC 9458) for Lantern Zero gateways.
@@ -73,6 +76,10 @@ starting point for making relays easy to host.
   (yes for 24 hours, no for 1 hour). A self-hosted server needs nothing
   from the relay operator. Operators may also set an allow list (only
   these gateways) or a deny list.
+- **What the caches show.** Both caches are shared by all clients, so a
+  client can tell from timing whether some client used a gateway within
+  the cache time. That says only that a public server has users, never
+  which client.
 - **Browsers.** Responses carry `Access-Control-Allow-Origin: *`, and
   the relay answers CORS preflights, as mailroom and Oblivious do, so
   wallets running in a browser can use it. That reveals nothing: the
@@ -81,12 +88,12 @@ starting point for making relays easy to host.
 ## Rules (spec §1.1, and what operators promise)
 
 - **Headers.** It forwards only `Content-Type`, and sets only what HTTP
-  framing needs. It adds nothing about the client: no `Forwarded`, no
+  framing needs plus a constant `Accept: message/ohttp-res`. It adds nothing about the client: no `Forwarded`, no
   `X-Forwarded-For`, no region, no connection state. Responses carry
   back only `Content-Type`, framing, and the CORS header.
 - **Timeouts.** It allows the gateway 40 seconds to send the first byte
   (spec §1.1 requires at least 35, for 30-second long-polls) and 60 in
-  all. The reverse proxy in front of it must allow at least as long;
+  all, and a client 10 seconds to send its request body. The reverse proxy in front of it must allow at least as long;
   the Compose example's does.
 - **Sizes.** Request bodies are capped at the largest encapsulated
   request (`lz_proto::padding::REQUEST_SIZE` plus HPKE overhead) and
@@ -110,6 +117,9 @@ starting point for making relays easy to host.
   to send POSTs to services that aren't Lantern Zero gateways. Targets
   are `https` only; ports other than 443 (self-hosted servers may use
   them) are an operator setting, and plain `http` is for tests only.
+  Hosts are read the way the HTTP client reads them (WHATWG URL rules),
+  so `2130706433` or `0x7f.1` is checked as the `127.0.0.1` it would
+  connect to, not passed on as a name.
 
 ## Deployment
 
@@ -139,10 +149,11 @@ starting point for making relays easy to host.
   HTTP/2, a DNS resolver of our own that drops non-public addresses,
   redirects turned off, and proxy settings from the environment ignored
   (they would route around the resolver).
-- Logging and hardening follow the server. This would be the third copy
-  of `log_filter` and the owner-only file helpers, which is when
-  CLAUDE.md says to consider a shared server-side crate; decide that
-  when writing the code.
+- Logging and hardening follow the server. The relay copies the
+  server's address checks (`src/ssrf.rs`) and `log_filter` rather than
+  sharing them: a shared server-side crate (CLAUDE.md, "No shared
+  server/gateway crate yet") would mean reworking the server's imports,
+  so it's a separate change, now with three users.
 - **Tests:**
   - headers: a fake gateway records what arrives and asserts that only
     `Content-Type` does;
@@ -155,8 +166,8 @@ starting point for making relays easy to host.
     `ohttp-key` answer triggers one refetch per minute at most;
   - forgery: refuses loopback, private, and link-local targets,
     including names that resolve to them, origins with a path or
-    userinfo, and redirects; plus a fuzz target for gateway-origin
-    parsing;
+    userinfo, and redirects; plus property tests for gateway-origin
+    parsing, the input clients fully control;
   - limits: oversize bodies, rate limits, and the 40-second first byte
     (with a held fake long-poll);
   - end to end: `lz-server` and `lz-client` through the relay, as in the

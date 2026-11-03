@@ -1992,6 +1992,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "lz-relay"
+version = "0.0.1"
+dependencies = [
+ "axum",
+ "http",
+ "lz-client",
+ "lz-proto",
+ "lz-server",
+ "proptest",
+ "reqwest",
+ "rustix",
+ "serde",
+ "thiserror",
+ "tokio",
+ "toml 1.1.8+spec-1.1.0",
+ "tracing",
+ "tracing-subscriber",
+ "url",
+]
+
+[[package]]
 name = "lz-server"
 version = "0.0.1"
 dependencies = [
