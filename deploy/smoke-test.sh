@@ -1,23 +1,30 @@
 #!/usr/bin/env bash
 # Smoke test for the self-hosting kit's byo-node profile: builds the images
 # from this checkout (or, with PINNED=1, pulls the release images that
-# compose.yaml pins), runs `init` against the regtest chain in deploy/regtest (as the "existing
-# node"), starts the server with the kit's hardening, and runs `doctor`.
+# compose.yaml pins), runs `init` against a regtest chain from
+# deploy/regtest (as the "existing node"), starts the server with the
+# kit's hardening, and runs `doctor`.
 # It doesn't reach the onion service over the Tor network, which would be
 # slow and flaky in CI. Needs Docker; CI runs it.
 #
 #   deploy/smoke-test.sh          # leaves nothing behind
-#   KEEP=1 deploy/smoke-test.sh   # keeps the kit running to look at
+#   KEEP=1 deploy/smoke-test.sh   # keeps the kit running to look at; then
+#     docker compose -p lz-smoke --profile tools down -v
+#     docker compose -p lz-smoke-chain -f regtest/compose.yaml down
 #   PINNED=1 deploy/smoke-test.sh # the pinned release images (RELEASING.md)
 set -euo pipefail
 cd "$(dirname "$0")"
 
 export COMPOSE_PROJECT_NAME=lz-smoke
+# The chain runs as its own Compose project, not the `lz-regtest` one that
+# the regtest tests use, and publishes no ports, so the smoke test neither
+# collides with nor tears down a regtest chain already running here.
+chain_project=lz-smoke-chain
 export COMPOSE_PROFILES=
 export LZ_NETWORK=regtest
-# The regtest Zaino, reached over the regtest network (below). Not
+# The chain's Zaino, reached over the chain's network (below). Not
 # host.docker.internal: on Linux that can't reach ports bound to 127.0.0.1.
-export LZ_LIGHTWALLETD=http://lz-regtest-zaino-1:8137
+export LZ_LIGHTWALLETD=http://$chain_project-zaino-1:8137
 export LZ_VAPID_CONTACT=mailto:smoke-test@example.org
 # Local tags, so `build` doesn't try to tag the build with a digest.
 if [[ "${PINNED:-}" != 1 ]]; then
@@ -33,25 +40,34 @@ export LZ_TOR_SOCKS=
 # Attach the server to the regtest chain's network, as a byo-node install
 # would reach its node.
 override=$(mktemp)
-cat >"$override" <<'YAML'
+cat >"$override" <<YAML
 services:
   server:
     networks:
       regtest: {}
 networks:
   regtest:
-    name: lz-regtest_default
+    name: ${chain_project}_default
     external: true
 YAML
+chain_override=$(mktemp)
+cat >"$chain_override" <<'YAML'
+services:
+  zebra:
+    ports: !reset []
+  zaino:
+    ports: !reset []
+YAML
+chain=(docker compose -p "$chain_project" -f regtest/compose.yaml -f "$chain_override")
 # Ignore any .env here: the variables above are the whole configuration.
 kit=(docker compose --env-file /dev/null -f compose.yaml -f "$override")
 
 cleanup() {
   if [[ "${KEEP:-}" != 1 ]]; then
     "${kit[@]}" --profile tools down -v --remove-orphans >/dev/null 2>&1 || true
-    docker compose -p lz-regtest -f regtest/compose.yaml down >/dev/null 2>&1 || true
+    "${chain[@]}" down >/dev/null 2>&1 || true
   fi
-  rm -f "$override"
+  rm -f "$override" "$chain_override"
 }
 trap cleanup EXIT
 
@@ -61,7 +77,7 @@ fail() {
   exit 1
 }
 
-docker compose -p lz-regtest -f regtest/compose.yaml up -d --wait
+"${chain[@]}" up -d --wait
 if [[ "${PINNED:-}" == 1 ]]; then
   "${kit[@]}" pull server tor
 else
