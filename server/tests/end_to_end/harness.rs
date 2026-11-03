@@ -213,7 +213,7 @@ impl Harness {
             HOST,
             path,
             Some(&self.token),
-            SystemTime::now(),
+            self.state.clock.now(),
             body.as_ref(),
         );
         self.send_raw(&inner).await

@@ -54,7 +54,9 @@ impl Store {
     }
 
     /// The account for a token hash, if any. Compares every stored hash in
-    /// constant time (spec §2.2).
+    /// constant time (spec §2.2). On the system clock, for tests and
+    /// commands; a running server uses
+    /// [`authenticate_at`](Self::authenticate_at) with its own clock.
     pub fn authenticate(&self, hash: &TokenHash) -> Option<AccountId> {
         self.authenticate_at(hash, unix_now())
     }
@@ -181,7 +183,8 @@ impl Store {
         Ok(())
     }
 
-    /// Whether the account still exists.
+    /// Whether the account still exists, on the system clock (see
+    /// [`authenticate`](Self::authenticate)).
     pub fn has_account(&self, account: AccountId) -> bool {
         self.has_account_at(account, unix_now())
     }
@@ -197,13 +200,19 @@ impl Store {
     /// Deletes the account's token hashes, devices, replay window, scanning
     /// end time, and activity day (spec §4.6). With the issuer on, its id
     /// is kept in the deletion log. The scanner's lease and events are the
-    /// caller's to drop.
+    /// caller's to drop. On the system clock (see
+    /// [`authenticate`](Self::authenticate)).
     pub fn delete_account(&self, account: AccountId) -> std::io::Result<()> {
+        self.delete_account_at(account, unix_now())
+    }
+
+    /// [`Store::delete_account`] at `now_unix`.
+    pub fn delete_account_at(&self, account: AccountId, now_unix: u64) -> std::io::Result<()> {
         {
             let mut accounts = self.accounts.lock().expect("accounts lock");
             self.rewrite_accounts(
                 &mut accounts,
-                unix_now(),
+                now_unix,
                 &mut |e| (e.account != account).then_some(*e),
                 None,
             )?;
@@ -223,7 +232,7 @@ impl Store {
                 st.deletions.push(Deletion {
                     seq,
                     account: id,
-                    at: unix_now(),
+                    at: now_unix,
                 });
             }
         }

@@ -326,8 +326,8 @@ fn leases_renew_replace_end_and_expire() {
 
     // Opt-out drops keys and events at once (invariants 2 and 3).
     assert_eq!(pay(&s, &alice, 10, 1, 10, now), 1, "B's lease matches");
-    s.end_lease(B);
-    assert!(!s.has_lease(B));
+    s.end_lease(B, now);
+    assert!(!s.has_lease(B, now));
     assert!(s.page(B, None, 3500).events.is_empty());
 
     // Expiry: the lease stops matching at once, and keys leave memory.
@@ -335,7 +335,7 @@ fn leases_renew_replace_end_and_expire() {
     assert!(!s.lease_status(A, expired).active);
     assert!(s.active_keys(expired).is_empty());
     assert_eq!(pay(&s, &other, 11, 2, 11, expired), 0);
-    assert!(!s.has_lease(A));
+    assert!(!s.has_lease(A, expired));
 }
 
 #[test]

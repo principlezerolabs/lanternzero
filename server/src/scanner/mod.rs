@@ -38,7 +38,7 @@ pub use decrypt::{MEMO_LEN, Match, Memo, trial_decrypt, trial_decrypt_txs};
 pub(crate) use decrypt::{memo_of, trial_decrypt_txs_refs};
 pub use live::{
     PAYMENT_PUSHES_PER_MINUTE, alert, backfill, run, scan_block, scan_block_at, scan_blocks,
-    scan_blocks_at, sweep_loop,
+    scan_blocks_at, sweep, sweep_loop,
 };
 pub use release::MIN_RELEASE_GAP;
 pub use webhooks::{Due, RETRY_WINDOW};

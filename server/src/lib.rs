@@ -34,10 +34,12 @@ pub mod scanner;
 pub mod set_chain;
 pub mod ssrf;
 pub mod store;
+pub mod tasks;
 pub mod viewkey;
 pub mod webhook;
 pub mod webpush;
 
+use std::future::Future;
 use std::sync::Arc;
 
 use clock::unix_now;
@@ -63,6 +65,11 @@ pub struct AppState {
     pub push_backoff: limits::PushBackoff,
     /// Instant payment pushes per account (spec §5.2).
     pub payment_push_limiter: limits::RateLimiter<store::AccountId>,
+    /// The time, for everything the server does (see [`clock`]).
+    pub clock: clock::Clock,
+    /// Short-lived background work (backfills, payment pushes, webhook
+    /// deliveries), so tests can wait for it with [`AppState::settle`].
+    pub tasks: tasks::Tasks,
 }
 
 impl std::fmt::Debug for AppState {
@@ -88,7 +95,8 @@ pub enum StartError {
 impl AppState {
     pub fn new(config: config::Config) -> Result<Arc<Self>, StartError> {
         files::create_private_dir(&config.data_dir)?;
-        let now = unix_now();
+        let clock = clock::Clock::default();
+        let now = clock.unix_now();
         let pruned = ohttp_keys::prune(&config.data_dir, now)?;
         if pruned > 0 {
             tracing::info!(pruned, "deleted OHTTP keys past their overlap");
@@ -129,11 +137,27 @@ impl AppState {
             device_limiter,
             push_backoff: limits::PushBackoff::default(),
             payment_push_limiter: limits::RateLimiter::new(scanner::PAYMENT_PUSHES_PER_MINUTE),
+            clock,
+            tasks: tasks::Tasks::default(),
         }))
     }
 }
 
 impl AppState {
+    /// Runs short-lived background work on [`AppState::tasks`].
+    pub fn spawn<F>(&self, task: F)
+    where
+        F: Future<Output = ()> + Send + 'static,
+    {
+        self.tasks.spawn(task);
+    }
+
+    /// Waits until no background task started with [`AppState::spawn`] is
+    /// running. For tests, which then check that something did not happen.
+    pub async fn settle(&self) {
+        self.tasks.settle().await;
+    }
+
     /// Writes the store's state if it changed, on a blocking thread, so
     /// writing `state.json` doesn't hold up async tasks.
     pub async fn flush_store(self: &Arc<Self>) {
@@ -148,8 +172,10 @@ impl AppState {
     /// events, and hints in memory. Used by the API, the idle sweep, and
     /// the issuer.
     pub fn delete_account(&self, account: store::AccountId) -> std::io::Result<()> {
-        self.store.delete_account(account)?;
-        self.scanner.end_lease(account);
+        let now = self.clock.now();
+        self.store
+            .delete_account_at(account, clock::unix_secs(now))?;
+        self.scanner.end_lease(account, now);
         Ok(())
     }
 
@@ -177,7 +203,7 @@ pub async fn account_sweep_loop(state: Arc<AppState>) {
     let mut tick = tokio::time::interval(std::time::Duration::from_secs(3600));
     loop {
         tick.tick().await;
-        let deleted = state.sweep_accounts(unix_now());
+        let deleted = state.sweep_accounts(state.clock.unix_now());
         if deleted > 0 {
             tracing::info!(deleted, "deleted idle accounts");
         }
@@ -195,7 +221,7 @@ pub async fn ohttp_key_sweep_loop(state: Arc<AppState>) {
     tick.tick().await; // AppState::new just loaded them.
     loop {
         tick.tick().await;
-        let now = unix_now();
+        let now = state.clock.unix_now();
         let dropped = state.ohttp.drop_expired(now);
         match ohttp_keys::prune(&state.config.data_dir, now) {
             Ok(pruned) if dropped + pruned > 0 => {

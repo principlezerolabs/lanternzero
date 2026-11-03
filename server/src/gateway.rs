@@ -110,7 +110,7 @@ async fn relay(
     if !is_ohttp {
         return StatusCode::UNSUPPORTED_MEDIA_TYPE.into_response();
     }
-    let now = crate::clock::unix_now();
+    let now = gw.app.clock.unix_now();
     // The plaintext holds the bearer token (and, later, viewing keys).
     // Errors before it exists can't be encrypted back to the client.
     let (plain, response_ctx) = match gw.app.ohttp.decapsulate(&body, now) {
@@ -122,7 +122,7 @@ async fn relay(
         Ok(resp) => resp,
         Err(problem) => problem.into_response(),
     };
-    let encoded = match encode_response(inner).await {
+    let encoded = match encode_response(inner, gw.app.clock.now()).await {
         Some(bytes) => bytes,
         None => {
             tracing::error!("inner response too large for the fixed size");
@@ -133,6 +133,7 @@ async fn relay(
                     "internal error",
                 )
                 .into_response(),
+                gw.app.clock.now(),
             )
             .await
             {
@@ -237,10 +238,10 @@ async fn handle_inner(gw: &GatewayState, plain: Zeroizing<Vec<u8>>) -> Result<Re
 
 /// Encodes a response as padded known-length Binary HTTP, or `None` if it
 /// can't fit [`RESPONSE_SIZE`].
-async fn encode_response(mut resp: Response) -> Option<Vec<u8>> {
+async fn encode_response(mut resp: Response, now: std::time::SystemTime) -> Option<Vec<u8>> {
     // The gateway's own problems (bad size, bad target) are dated too.
     if !resp.headers().contains_key(header::DATE) {
-        crate::api::set_date(&mut resp);
+        crate::api::set_date(&mut resp, now);
     }
     let (parts, body) = resp.into_parts();
     let body = axum::body::to_bytes(body, MAX_INNER_BODY).await.ok()?;

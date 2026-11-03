@@ -65,9 +65,9 @@ impl Scanner {
 
     /// Opt-out (`lease: null`): drops the lease, its keys, and the account's
     /// events and hints at once.
-    pub fn end_lease(&self, account: AccountId) {
+    pub fn end_lease(&self, account: AccountId, now: SystemTime) {
         let mut inner = self.lock();
-        drop_expired_leases(&mut inner, SystemTime::now());
+        drop_expired_leases(&mut inner, now);
         inner.leases.remove(&account);
         inner.events.remove(&account);
         inner.unfinalized.retain(|(a, _)| *a != account);
@@ -89,8 +89,7 @@ impl Scanner {
     }
 
     /// Whether the account has an active (unexpired) lease.
-    pub fn has_lease(&self, account: AccountId) -> bool {
-        let now = SystemTime::now();
+    pub fn has_lease(&self, account: AccountId, now: SystemTime) -> bool {
         let mut inner = self.lock();
         drop_expired_leases(&mut inner, now);
         inner.leases.contains_key(&account)
@@ -120,8 +119,7 @@ impl Scanner {
             .is_some_and(|l| l.generation == generation && l.expires_at > now)
     }
 
-    pub fn alert_mode(&self, account: AccountId) -> Option<AlertMode> {
-        let now = SystemTime::now();
+    pub fn alert_mode(&self, account: AccountId, now: SystemTime) -> Option<AlertMode> {
         let mut inner = self.lock();
         drop_expired_leases(&mut inner, now);
         inner.leases.get(&account).map(|l| l.alert_mode)

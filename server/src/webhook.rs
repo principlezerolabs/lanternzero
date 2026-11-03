@@ -12,7 +12,6 @@ use reqwest::header::{CONTENT_TYPE, HeaderValue};
 use tokio::sync::Semaphore;
 
 use crate::AppState;
-use crate::clock::unix_secs;
 use crate::scanner::Due;
 use crate::store::Webhook;
 
@@ -31,7 +30,7 @@ pub async fn run(state: Arc<AppState>) {
             _ = release.changed() => {}
             _ = tick.tick() => {}
         }
-        deliver_due(&state, &limit, SystemTime::now());
+        deliver_due(&state, &limit, state.clock.now());
     }
 }
 
@@ -39,8 +38,9 @@ pub async fn run(state: Arc<AppState>) {
 pub fn deliver_due(state: &Arc<AppState>, limit: &Arc<Semaphore>, now: SystemTime) {
     for hook in state.store.webhooks() {
         for due in state.scanner.webhook_due(hook.account, now) {
-            let (state, limit, hook) = (state.clone(), limit.clone(), hook.clone());
-            tokio::spawn(async move {
+            let (task_state, limit, hook) = (state.clone(), limit.clone(), hook.clone());
+            state.spawn(async move {
+                let state = task_state;
                 let Ok(_permit) = limit.acquire_owned().await else {
                     return;
                 };
@@ -51,7 +51,7 @@ pub fn deliver_due(state: &Arc<AppState>, limit: &Arc<Semaphore>, now: SystemTim
                     &due.event_id,
                     &due.webhook_id,
                     delivered,
-                    SystemTime::now(),
+                    state.clock.now(),
                 );
                 if outcome == Outcome::Gone
                     && state.store.delete_webhook_if(hook.account, &hook.secret)
@@ -85,7 +85,7 @@ pub async fn send(state: &AppState, hook: &Webhook, due: &Due) -> Outcome {
     let Ok(body) = serde_json::to_vec(&due.body) else {
         return Outcome::Failed;
     };
-    let timestamp = unix_secs(SystemTime::now());
+    let timestamp = state.clock.unix_now();
     let signature = lz_proto::webhook::sign(&hook.secret, &due.webhook_id, timestamp, &body);
     let (Ok(id), Ok(signature)) = (
         HeaderValue::from_str(&due.webhook_id),

@@ -54,7 +54,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v0/token/rotate", post(rotate_token))
         .route("/v0/account", delete(delete_account))
         .route("/v0/webhook", put(put_webhook).delete(delete_webhook))
-        .layer(middleware::from_fn(require_date))
+        .layer(middleware::from_fn_with_state(state.clone(), require_date))
         .with_state(state)
 }
 
@@ -165,27 +165,27 @@ impl From<StoreError> for Problem {
 
 /// Rejects requests without a current `Date` header, and dates every
 /// response, so a wallet whose clock is off can correct it (spec §3.4).
-async fn require_date(req: Request, next: Next) -> Response {
-    let mut resp = check_date(req, next).await;
-    set_date(&mut resp);
+async fn require_date(State(state): State<Arc<AppState>>, req: Request, next: Next) -> Response {
+    let mut resp = check_date(&state, req, next).await;
+    set_date(&mut resp, state.clock.now());
     resp
 }
 
-/// Sets `Date` to now, as an IMF-fixdate (always 29 bytes).
-pub(crate) fn set_date(resp: &mut Response) {
-    if let Ok(v) = header::HeaderValue::from_str(&httpdate::fmt_http_date(SystemTime::now())) {
+/// Sets `Date` to `now`, as an IMF-fixdate (always 29 bytes).
+pub(crate) fn set_date(resp: &mut Response, now: SystemTime) {
+    if let Ok(v) = header::HeaderValue::from_str(&httpdate::fmt_http_date(now)) {
         resp.headers_mut().insert(header::DATE, v);
     }
 }
 
-async fn check_date(req: Request, next: Next) -> Response {
+async fn check_date(state: &AppState, req: Request, next: Next) -> Response {
     let ok = req
         .headers()
         .get(header::DATE)
         .and_then(|v| v.to_str().ok())
         .and_then(|v| httpdate::parse_http_date(v).ok())
         .is_some_and(|date| {
-            let now = SystemTime::now();
+            let now = state.clock.now();
             let skew = now
                 .duration_since(date)
                 .or_else(|_| date.duration_since(now))
@@ -226,11 +226,11 @@ fn authenticate_hash(
     let hash = TokenHash::of_text(text.trim());
     let account = state
         .store
-        .authenticate(&hash)
+        .authenticate_at(&hash, state.clock.unix_now())
         .ok_or_else(Problem::unauthorized)?;
     state
         .account_limiter
-        .check(&account, SystemTime::now())
+        .check(&account, state.clock.now())
         .map_err(Problem::rate_limited)?;
     Ok((account, hash))
 }
@@ -239,7 +239,7 @@ fn authenticate_hash(
 fn limit_device(state: &AppState, device_id: &str) -> Result<(), Problem> {
     state
         .device_limiter
-        .check(device_id, SystemTime::now())
+        .check(device_id, state.clock.now())
         .map_err(Problem::rate_limited)
 }
 
@@ -375,9 +375,9 @@ async fn wake(
     let req: WakeRequest = parse_zero(body)?;
     accept_client_seq(&state, account, req.device_id.as_deref(), req.seq)?;
     state.scanner.ack(account, &req.ack);
-    let now = SystemTime::now();
+    let now = state.clock.now();
     match &req.lease {
-        None => state.scanner.end_lease(account),
+        None => state.scanner.end_lease(account, now),
         Some(lease) => {
             lease
                 .validate(state.config.network)
@@ -404,7 +404,7 @@ async fn wake(
                 ScanningPolicy::Entitled => {
                     let left = state.store.scan_secs_left(account, unix_secs(now));
                     if left == 0 {
-                        state.scanner.end_lease(account);
+                        state.scanner.end_lease(account, now);
                         return Err(Problem::new(
                             StatusCode::FORBIDDEN,
                             problem::SCANNING_NOT_INCLUDED,
@@ -422,12 +422,12 @@ async fn wake(
                 .scanner
                 .set_lease(account, keys, lease, duration, tip, now)
             {
-                tokio::spawn(crate::scanner::backfill(state.clone(), bf));
+                state.spawn(crate::scanner::backfill(state.clone(), bf));
             }
             // The account was deleted while this request was in flight: a
             // lease must not outlive it (spec §4.6).
-            if !state.store.has_account(account) {
-                state.scanner.end_lease(account);
+            if !state.store.has_account_at(account, unix_secs(now)) {
+                state.scanner.end_lease(account, now);
                 return Err(Problem::unauthorized());
             }
         }
@@ -520,7 +520,7 @@ async fn rotate_token(
     state.store.accept_account_seq(account, req.seq)?;
     let new = TokenHash::from_hex(&req.new_token_hash)
         .ok_or_else(|| Problem::bad_request("invalid new_token_hash"))?;
-    let now = unix_secs(SystemTime::now());
+    let now = state.clock.unix_now();
     match state.store.rotate_token(account, &presented, &new, now) {
         Ok(()) => Ok(StatusCode::NO_CONTENT.into_response()),
         // Says nothing about whose token it is.

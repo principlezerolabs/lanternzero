@@ -117,14 +117,14 @@ pub async fn scan_raw(state: &Arc<AppState>, raw: Vec<Vec<u8>>, branch: BranchId
     let (parsed, failed) = tokio::task::spawn_blocking(move || parse_batch(raw, branch))
         .await
         .unwrap_or((vec![], 0));
-    scan_chunk_at(state, parsed, SystemTime::now()).await;
+    scan_chunk_at(state, parsed, state.clock.now()).await;
     failed
 }
 
 /// Checks one mempool transaction in compact form (so without memos)
 /// against every active lease. Used by tests.
 pub async fn scan_tx(state: &Arc<AppState>, tx: CompactTx) {
-    scan_tx_at(state, tx, SystemTime::now()).await;
+    scan_tx_at(state, tx, state.clock.now()).await;
 }
 
 /// Like [`scan_tx`], with a fixed clock for rate-limit tests.

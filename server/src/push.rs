@@ -90,7 +90,7 @@ fn ping_plaintext(t: PingType, mut events: Vec<Event>) -> Vec<u8> {
 /// Runs forever: waits for each half-hour boundary, then sends a round.
 pub async fn run(state: Arc<AppState>) {
     loop {
-        tokio::time::sleep(until_next_slot(SystemTime::now())).await;
+        tokio::time::sleep(until_next_slot(state.clock.now())).await;
         let stats = wake_round(&state, SPREAD).await;
         tracing::info!(?stats, "wake round finished");
         state.flush_store().await;
@@ -114,7 +114,7 @@ pub async fn wake_round(state: &Arc<AppState>, spread: Duration) -> RoundStats {
     for (id, device) in state.store.devices() {
         // A gateway that sent `429` with `Retry-After` is left alone until
         // then (spec §5.3).
-        if state.push_backoff.is_paused(&id, SystemTime::now()) {
+        if state.push_backoff.is_paused(&id, state.clock.now()) {
             stats.rate_limited += 1;
             continue;
         }
@@ -128,7 +128,7 @@ pub async fn wake_round(state: &Arc<AppState>, spread: Duration) -> RoundStats {
         let body = bodies
             .entry(device.account)
             .or_insert_with(|| {
-                let events = state.scanner.ping_events(device.account, SystemTime::now());
+                let events = state.scanner.ping_events(device.account, state.clock.now());
                 if events.is_empty() {
                     empty.clone()
                 } else {
@@ -161,7 +161,7 @@ pub async fn send_payment(state: &Arc<AppState>, account: AccountId, event: &Eve
     let body = Arc::new(ping_plaintext(PingType::Payment, vec![event.clone()]));
     let permits = Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_SENDS));
     let mut tasks = JoinSet::new();
-    let now = SystemTime::now();
+    let now = state.clock.now();
     for (id, device) in state.store.devices() {
         if device.account != account || state.push_backoff.is_paused(&id, now) {
             continue;
@@ -215,7 +215,7 @@ pub async fn send(
                     .and_then(|v| v.to_str().ok());
                 state
                     .push_backoff
-                    .pause(device_id, retry_after, SystemTime::now(), WAKE_INTERVAL);
+                    .pause(device_id, retry_after, state.clock.now(), WAKE_INTERVAL);
                 tracing::warn!(device_id, "push gateway rate limited us");
                 Outcome::RateLimited
             }
@@ -248,7 +248,7 @@ fn build_request(
         p256::PublicKey::from_sec1_bytes(&URL_SAFE_NO_PAD.decode(&device.p256dh).ok()?).ok()?;
     let auth: [u8; 16] = URL_SAFE_NO_PAD.decode(&device.auth).ok()?.try_into().ok()?;
     let body = crate::webpush::encrypt(plaintext, &ua_public, &auth).ok()?;
-    let expires = crate::clock::unix_now() + VAPID_VALIDITY.as_secs();
+    let expires = state.clock.unix_now() + VAPID_VALIDITY.as_secs();
     // The key this device's subscription is bound to (spec §5.3).
     let vapid = match device.vapid.as_deref() {
         Some(k) => state.vapid.get(k)?,

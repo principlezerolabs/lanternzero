@@ -18,7 +18,7 @@ use super::{BLOCK_COALESCE, Backfill};
 /// Scans one or more blocks with every active lease, records matches, and
 /// sends instant alerts. Used by [`run`] and by tests.
 pub async fn scan_blocks(state: &Arc<AppState>, blocks: Vec<Arc<CompactBlock>>) {
-    scan_blocks_at(state, blocks, SystemTime::now()).await;
+    scan_blocks_at(state, blocks, state.clock.now()).await;
 }
 
 pub async fn scan_blocks_at(
@@ -69,7 +69,7 @@ pub async fn scan_blocks_at(
 
 /// Scans one block. Convenience wrapper for tests.
 pub async fn scan_block(state: &Arc<AppState>, block: Arc<CompactBlock>) {
-    scan_block_at(state, block, SystemTime::now()).await;
+    scan_block_at(state, block, state.clock.now()).await;
 }
 
 /// Like [`scan_block`], with a fixed clock for rate-limit tests.
@@ -88,7 +88,7 @@ pub const PAYMENT_PUSHES_PER_MINUTE: u32 = 2;
 pub fn alert(state: &Arc<AppState>, new: Vec<(AccountId, Event)>, now: SystemTime) {
     let mut seen = std::collections::HashSet::new();
     for (account, event) in new {
-        if state.scanner.alert_mode(account) != Some(AlertMode::Instant) {
+        if state.scanner.alert_mode(account, now) != Some(AlertMode::Instant) {
             continue;
         }
         if !seen.insert((account, event.compact_tx.clone())) {
@@ -97,8 +97,8 @@ pub fn alert(state: &Arc<AppState>, new: Vec<(AccountId, Event)>, now: SystemTim
         if state.payment_push_limiter.check(&account, now).is_err() {
             continue;
         }
-        let state = state.clone();
-        tokio::spawn(async move { crate::push::send_payment(&state, account, &event).await });
+        let task_state = state.clone();
+        state.spawn(async move { crate::push::send_payment(&task_state, account, &event).await });
     }
 }
 
@@ -116,7 +116,7 @@ pub async fn backfill(state: Arc<AppState>, bf: Backfill) {
     while start <= bf.to {
         if !state
             .scanner
-            .is_current(bf.account, bf.generation, SystemTime::now())
+            .is_current(bf.account, bf.generation, state.clock.now())
         {
             return;
         }
@@ -147,11 +147,11 @@ pub async fn backfill(state: Arc<AppState>, bf: Backfill) {
         for (i, m) in matches {
             if !state
                 .scanner
-                .is_current(bf.account, bf.generation, SystemTime::now())
+                .is_current(bf.account, bf.generation, state.clock.now())
             {
                 return;
             }
-            let new = state.scanner.record(&blocks[i], &m, tip, SystemTime::now());
+            let new = state.scanner.record(&blocks[i], &m, tip, state.clock.now());
             found_any |= !new.is_empty();
         }
         start = end + 1;
@@ -161,7 +161,7 @@ pub async fn backfill(state: Arc<AppState>, bf: Backfill) {
     if !pending.is_empty()
         && state
             .scanner
-            .is_current(bf.account, bf.generation, SystemTime::now())
+            .is_current(bf.account, bf.generation, state.clock.now())
     {
         let leases = vec![(bf.account, bf.keys.clone())];
         let pending = Arc::new(pending);
@@ -177,7 +177,7 @@ pub async fn backfill(state: Arc<AppState>, bf: Backfill) {
             let new = state.scanner.record_mempool(
                 &pending[m.tx],
                 vec![(Match { tx: 0, ..m }, None)],
-                SystemTime::now(),
+                state.clock.now(),
             );
             found_any |= !new.is_empty();
         }
@@ -190,12 +190,12 @@ pub async fn backfill(state: Arc<AppState>, bf: Backfill) {
 fn catch_up_after_lag(state: &Arc<AppState>, last_height: &mut u64, skipped: u64) {
     tracing::warn!(skipped, "scanner fell behind the chain");
     let tip = state.chain.tip();
-    for (account, keys) in state.scanner.active_keys(SystemTime::now()) {
+    for (account, keys) in state.scanner.active_keys(state.clock.now()) {
         let generation = state.scanner.lease_generation(account);
         if let Some(generation) = generation
             && *last_height < tip
         {
-            tokio::spawn(backfill(
+            state.spawn(backfill(
                 state.clone(),
                 Backfill {
                     account,
@@ -269,6 +269,12 @@ pub async fn sweep_loop(state: Arc<AppState>) {
     let mut tick = tokio::time::interval(Duration::from_secs(60));
     loop {
         tick.tick().await;
-        state.scanner.sweep(SystemTime::now());
+        sweep(&state);
     }
+}
+
+/// One pass of [`sweep_loop`]: drops leases and events expired by the
+/// server's clock (invariants 2 and 3).
+pub fn sweep(state: &AppState) {
+    state.scanner.sweep(state.clock.now());
 }

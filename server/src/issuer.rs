@@ -27,7 +27,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::AppState;
 use crate::api::{Problem, json, parse};
-use crate::clock::unix_now;
 use crate::store::{
     AccountId, CreateError, GrantError, MAX_GRANT_KEY_LEN, MAX_GRANT_SECS, account_hex,
     parse_account,
@@ -158,7 +157,7 @@ fn live_account(state: &AppState, s: &str, now: u64) -> Result<AccountId, Proble
 async fn create(State(state): State<Arc<AppState>>, body: Bytes) -> Result<Response, Problem> {
     let req: TokenHashBody = parse(&body)?;
     let hash = token_hash(&req.token_hash)?;
-    match state.store.create_account(&hash, unix_now()) {
+    match state.store.create_account(&hash, state.clock.unix_now()) {
         Ok(account) => Ok(json(
             StatusCode::CREATED,
             &AccountAnswer {
@@ -182,7 +181,7 @@ async fn create(State(state): State<Arc<AppState>>, body: Bytes) -> Result<Respo
 async fn resolve(State(state): State<Arc<AppState>>, body: Bytes) -> Result<Response, Problem> {
     let req: TokenHashBody = parse(&body)?;
     let hash = token_hash(&req.token_hash)?;
-    let account = state.store.resolve_at(&hash, unix_now());
+    let account = state.store.resolve_at(&hash, state.clock.unix_now());
     Ok(json(
         StatusCode::OK,
         &AccountAnswer {
@@ -194,7 +193,7 @@ async fn resolve(State(state): State<Arc<AppState>>, body: Bytes) -> Result<Resp
 /// `scan_until {account}`: the scanning end time, or `null` if none is left.
 async fn scan_until(State(state): State<Arc<AppState>>, body: Bytes) -> Result<Response, Problem> {
     let req: AccountBody = parse(&body)?;
-    let now = unix_now();
+    let now = state.clock.unix_now();
     let account = live_account(&state, &req.account, now)?;
     Ok(json(
         StatusCode::OK,
@@ -216,7 +215,7 @@ async fn add_scan_time(
     if req.key.is_empty() || req.key.len() > MAX_GRANT_KEY_LEN {
         return Err(Problem::bad_request("key must be 1 to 128 bytes"));
     }
-    let now = unix_now();
+    let now = state.clock.unix_now();
     let account = live_account(&state, &req.account, now)?;
     match state.store.add_scan_time(account, req.secs, &req.key, now) {
         Ok(until) => Ok(json(StatusCode::OK, &UntilAnswer { until: Some(until) })),
@@ -250,7 +249,7 @@ async fn deletions(State(state): State<Arc<AppState>>, body: Bytes) -> Result<Re
 /// handling or refunds.
 async fn delete(State(state): State<Arc<AppState>>, body: Bytes) -> Result<Response, Problem> {
     let req: AccountBody = parse(&body)?;
-    let account = live_account(&state, &req.account, unix_now())?;
+    let account = live_account(&state, &req.account, state.clock.unix_now())?;
     if let Err(e) = state.delete_account(account) {
         tracing::error!(error = %e, "issuer: cannot delete an account");
         return Err(Problem::internal());

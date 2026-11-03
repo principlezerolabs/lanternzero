@@ -18,7 +18,7 @@ use lz_server::config::LimitsConfig;
 use lz_server::gateway::GATEWAY_PATH;
 
 use super::harness::{BASE, HOST, Harness, harness, harness_full, receiver};
-use super::scanning::{eventually, sync_tip};
+use super::scanning::sync_tip;
 use crate::common::fake_lwd;
 use crate::common::wallet::{Wallet, action, block, tx};
 
@@ -154,7 +154,7 @@ async fn a_wallet_session_through_the_client_core() {
 
     // The scheduled ping, opened on the device.
     lz_server::push::wake_round(&h.state, Duration::ZERO).await;
-    eventually(|| !pushes.0.lock().unwrap().is_empty()).await;
+    // `wake_round` returns once every send has finished.
     let (_, body) = pushes.0.lock().unwrap().pop().unwrap();
     let ping = device.open_ping(&body).unwrap();
     assert_eq!(ping.t, PingType::Wake);
@@ -208,7 +208,7 @@ async fn a_wallet_session_through_the_client_core() {
     assert!(event.compact_tx.is_some());
 
     // The instant payment push, opened on the device.
-    eventually(|| !pushes.0.lock().unwrap().is_empty()).await;
+    h.state.settle().await;
     let (_, body) = pushes.0.lock().unwrap().pop().unwrap();
     let ping = device.open_ping(&body).unwrap();
     assert_eq!(ping.t, PingType::Payment);
@@ -314,12 +314,12 @@ async fn token_rotation_and_account_deletion_through_the_client_core() {
     assert_eq!(old.finish_wake(p, reply(&r)), Err(Error::Unauthorized));
 
     // Delete the account: everything goes at once, and the token stops.
-    assert!(h.state.scanner.has_lease(account));
+    assert!(h.state.scanner.has_lease(account, h.state.clock.now()));
     let p = c.delete_account(now_ms()).unwrap();
     sizes.push(p.request().body.len());
     let r = relay(&h, p.request()).await;
     c.finish_delete_account(p, reply(&r)).unwrap();
-    assert!(!h.state.scanner.has_lease(account));
+    assert!(!h.state.scanner.has_lease(account, h.state.clock.now()));
     assert!(h.state.store.devices().is_empty());
     assert!(!h.state.store.has_account(account));
     let mut after = client(&new_url, ClientState::default());
@@ -427,7 +427,7 @@ async fn vapid_rotation_keeps_devices_on_their_key_until_they_move() {
     // The old device is still signed for with the key its subscription is
     // bound to.
     lz_server::push::wake_round(&h.state, Duration::ZERO).await;
-    eventually(|| !pushes.0.lock().unwrap().is_empty()).await;
+    // `wake_round` returns once every send has finished.
     let (headers, body) = pushes.0.lock().unwrap().pop().unwrap();
     let auth = headers["authorization"].to_str().unwrap();
     assert!(auth.ends_with(&format!("k={k1}")), "{auth}");

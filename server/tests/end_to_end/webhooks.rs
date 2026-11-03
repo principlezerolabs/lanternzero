@@ -15,7 +15,7 @@ use serde_json::{Value, json};
 use tokio::sync::Semaphore;
 
 use super::harness::{Captured, Harness, harness_full, receiver};
-use super::scanning::{eventually, sync_tip};
+use super::scanning::sync_tip;
 use crate::common::fake_lwd;
 use crate::common::wallet::{self, Wallet, action, block, tx};
 
@@ -94,8 +94,10 @@ impl Shop {
         lz_server::scanner::scan_block(&self.h.state, Arc::new(b)).await;
     }
 
-    fn deliver(&self, at: SystemTime) {
+    /// Starts the deliveries due at `at` and waits for them to finish.
+    async fn deliver(&self, at: SystemTime) {
         lz_server::webhook::deliver_due(&self.h.state, &Arc::new(Semaphore::new(8)), at);
+        self.h.state.settle().await;
     }
 }
 
@@ -139,8 +141,8 @@ async fn deliveries_are_signed_follow_each_change_and_end_when_final() {
     s.lease().await;
     s.pay(101, 0xC1).await;
 
-    s.deliver(SystemTime::now());
-    eventually(|| deliveries(&got) == 1).await;
+    s.deliver(SystemTime::now()).await;
+    assert_eq!(deliveries(&got), 1);
     let (headers, body) = got.0.lock().unwrap()[0].clone();
     let d: Value = serde_json::from_slice(&body).unwrap();
     let id = headers["webhook-id"].to_str().unwrap();
@@ -167,14 +169,13 @@ async fn deliveries_are_signed_follow_each_change_and_end_when_final() {
     assert_eq!(d["txid"].as_str().unwrap().len(), 64);
 
     // The same state isn't sent again.
-    s.deliver(SystemTime::now());
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    s.deliver(SystemTime::now()).await;
     assert_eq!(deliveries(&got), 1);
 
     // Final: delivered once more, under a new id, then the event is gone.
     s.h.state.scanner.on_tip(100 + u64::from(FINALITY_DEPTH));
-    s.deliver(SystemTime::now());
-    eventually(|| deliveries(&got) == 2).await;
+    s.deliver(SystemTime::now()).await;
+    assert_eq!(deliveries(&got), 2);
     let final_id = got.0.lock().unwrap()[1].0["webhook-id"]
         .to_str()
         .unwrap()
@@ -183,14 +184,13 @@ async fn deliveries_are_signed_follow_each_change_and_end_when_final() {
         final_id,
         webhook_id(event, EventStatus::Mined, Some(101), FINALITY_DEPTH)
     );
-    eventually(|| {
+    assert!(
         s.h.state
             .scanner
             .page(s.account, None, 3500)
             .events
             .is_empty()
-    })
-    .await;
+    );
     assert!(s.h.state.scanner.hints(s.account).is_empty());
 }
 
@@ -203,32 +203,31 @@ async fn failures_are_retried_later_and_410_deletes_the_webhook() {
     s.pay(101, 0xC2).await;
 
     let t0 = SystemTime::now();
-    s.deliver(t0);
-    eventually(|| deliveries(&got) == 1).await;
-    tokio::time::sleep(Duration::from_millis(100)).await;
-    // Not again at once: the first retry waits 5 s or more.
-    s.deliver(t0 + Duration::from_secs(1));
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    s.deliver(t0).await;
     assert_eq!(deliveries(&got), 1);
-    s.deliver(t0 + Duration::from_secs(10));
-    eventually(|| deliveries(&got) == 2).await;
+    // Not again at once: the first retry waits 5 s or more.
+    s.deliver(t0 + Duration::from_secs(1)).await;
+    assert_eq!(deliveries(&got), 1);
+    s.deliver(t0 + Duration::from_secs(10)).await;
+    assert_eq!(deliveries(&got), 2);
     // The undelivered event is kept, whatever the cap.
     assert_eq!(
         s.h.state.scanner.page(s.account, None, 3500).events.len(),
         1
     );
     // After 24 hours of retries the state is given up on, not sent again.
-    s.deliver(t0 + lz_server::scanner::RETRY_WINDOW + Duration::from_secs(60));
-    s.deliver(t0 + lz_server::scanner::RETRY_WINDOW + Duration::from_secs(120));
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    s.deliver(t0 + lz_server::scanner::RETRY_WINDOW + Duration::from_secs(60))
+        .await;
+    s.deliver(t0 + lz_server::scanner::RETRY_WINDOW + Duration::from_secs(120))
+        .await;
     assert_eq!(deliveries(&got), 2);
 
     // A receiver that is gone for good loses its webhook.
     let (gone, gone_got) = receiver(StatusCode::GONE).await;
     s.put_webhook(&gone).await;
-    s.deliver(SystemTime::now());
-    eventually(|| deliveries(&gone_got) == 1).await;
-    eventually(|| !s.h.state.store.has_webhook(s.account)).await;
+    s.deliver(SystemTime::now()).await;
+    assert_eq!(deliveries(&gone_got), 1);
+    assert!(!s.h.state.store.has_webhook(s.account));
 }
 
 #[tokio::test]
@@ -342,8 +341,8 @@ async fn mempool_payments_carry_their_memo_to_the_final_delivery() {
         0
     );
 
-    s.deliver(SystemTime::now());
-    eventually(|| deliveries(&got) == 2).await;
+    s.deliver(SystemTime::now()).await;
+    assert_eq!(deliveries(&got), 2);
     let mut pools = Vec::new();
     for d in bodies(&got) {
         assert_eq!(d["status"], "mempool");
@@ -379,21 +378,20 @@ async fn mempool_payments_carry_their_memo_to_the_final_delivery() {
     mined.index = 1;
     lz_server::scanner::scan_block(&s.h.state, Arc::new(block(101, vec![mined]))).await;
     s.h.state.scanner.on_tip(100 + u64::from(FINALITY_DEPTH));
-    s.deliver(SystemTime::now());
-    eventually(|| deliveries(&got) == 4).await;
+    s.deliver(SystemTime::now()).await;
+    assert_eq!(deliveries(&got), 4);
     for d in &bodies(&got)[2..] {
         assert_eq!(d["status"], "mined");
         assert_eq!(memo_of(d).as_deref(), Some(&memo[..]));
     }
     // Final and delivered: the events, memos with them, are gone.
-    eventually(|| {
+    assert!(
         s.h.state
             .scanner
             .page(s.account, None, 3500)
             .events
             .is_empty()
-    })
-    .await;
+    );
 }
 
 #[tokio::test]
@@ -408,22 +406,21 @@ async fn a_memo_learned_later_waits_for_the_next_state() {
 
     // Seen first in compact form (as a backfill sees the mempool): no memo.
     lz_server::mempool::scan_tx(&s.h.state, compact.clone()).await;
-    s.deliver(SystemTime::now());
-    eventually(|| deliveries(&got) == 1).await;
+    s.deliver(SystemTime::now()).await;
+    assert_eq!(deliveries(&got), 1);
     assert_eq!(bodies(&got)[0]["memo"], Value::Null);
 
     // Then in full, as the stream sends it: no delivery for the memo alone.
     lz_server::mempool::scan_raw(&s.h.state, vec![raw], BRANCH).await;
-    s.deliver(SystemTime::now());
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    s.deliver(SystemTime::now()).await;
     assert_eq!(deliveries(&got), 1);
 
     // The next state carries it.
     let mut mined = compact;
     mined.index = 1;
     lz_server::scanner::scan_block(&s.h.state, Arc::new(block(101, vec![mined]))).await;
-    s.deliver(SystemTime::now());
-    eventually(|| deliveries(&got) == 2).await;
+    s.deliver(SystemTime::now()).await;
+    assert_eq!(deliveries(&got), 2);
     let d = &bodies(&got)[1];
     assert_eq!(d["status"], "mined");
     assert_eq!(memo_of(d).as_deref(), Some(&memo[..]));
@@ -447,8 +444,8 @@ async fn accounts_without_a_webhook_keep_no_memo() {
     let mut mined = lz_server::mempool::to_compact(&raw, BRANCH).unwrap();
     mined.index = 1;
     lz_server::scanner::scan_block(&s.h.state, Arc::new(block(101, vec![mined]))).await;
-    s.deliver(SystemTime::now());
-    eventually(|| deliveries(&got) == 1).await;
+    s.deliver(SystemTime::now()).await;
+    assert_eq!(deliveries(&got), 1);
     assert_eq!(bodies(&got)[0]["status"], "mined");
     assert_eq!(bodies(&got)[0]["memo"], Value::Null);
 }

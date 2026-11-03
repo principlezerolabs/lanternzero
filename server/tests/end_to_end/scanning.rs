@@ -5,9 +5,11 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use axum::http::StatusCode;
 use lz_proto::api::{DeviceRegistration, PushKeys};
+use lz_proto::lease::MIN_DURATION_SECS;
 use lz_proto::padding::RESPONSE_SIZE;
 use lz_server::config::{AccountsConfig, LimitsConfig, ScanningPolicy};
 use lz_server::push;
+use lz_server::scanner::EVENT_TTL;
 use serde_json::{Value, json};
 
 use super::harness::{
@@ -192,7 +194,8 @@ async fn lease_live_match_long_poll_instant_push_and_ack() {
     let cursor = r.json["cursor"].as_str().unwrap().to_owned();
 
     // An instant payment push went out, encrypted, fixed size, no tx data.
-    eventually(|| !s.pushes.0.lock().unwrap().is_empty()).await;
+    s.h.state.settle().await;
+    assert_eq!(s.pushes.0.lock().unwrap().len(), 1);
     let (headers, body) = s.pushes.0.lock().unwrap().pop().unwrap();
     assert_eq!(headers["urgency"], "high");
     assert_eq!(headers["ttl"], "86400");
@@ -272,14 +275,15 @@ async fn backfill_finds_older_payments_without_pushing() {
 
     let r = s.wake(&[], lease_json(&alice, 40, "instant")).await;
     assert_eq!(r.status, 200);
-    eventually(|| s.page_len() == 1).await;
+    s.h.state.settle().await;
+    assert_eq!(s.page_len(), 1, "the backfill finds it");
     let r = s.wake(&[], lease_json(&alice, 40, "instant")).await;
     let e = &r.json["events"][0];
     assert_eq!(
         (e["height"].as_u64(), e["confirmations"].as_u64()),
         (Some(50), Some(10))
     );
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    s.h.state.settle().await;
     assert!(
         s.pushes.0.lock().unwrap().is_empty(),
         "backfill must not push"
@@ -301,7 +305,7 @@ async fn private_mode_events_ride_in_the_scheduled_ping() {
         )],
     );
     lz_server::scanner::scan_block(&s.h.state, Arc::new(b)).await;
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    s.h.state.settle().await;
     assert!(
         s.pushes.0.lock().unwrap().is_empty(),
         "private mode: no extra push"
@@ -336,8 +340,84 @@ async fn opt_out_drops_lease_and_events() {
     let r = s.wake(&[], Value::Null).await;
     assert_eq!(r.json["lease"]["active"], false);
     assert_eq!(r.json["events"], json!([]));
-    assert!(!s.h.state.scanner.has_lease(s.account));
+    assert!(
+        !s.h.state
+            .scanner
+            .has_lease(s.account, s.h.state.clock.now())
+    );
     assert_eq!(s.page_len(), 0);
+}
+
+/// Invariant 2 on the server's own clock: a lease stops matching the moment
+/// it expires, without any request from the wallet.
+#[tokio::test]
+async fn an_expired_lease_stops_matching() {
+    let alice = Wallet::new(1);
+    let mut s = scanning(10).await;
+    let state = s.h.state.clone();
+    let mut lease = lease_json(&alice, 10, "instant");
+    lease["duration_secs"] = json!(MIN_DURATION_SECS);
+    let r = s.wake(&[], lease).await;
+    assert_eq!(r.json["lease"]["active"], true);
+    state.settle().await;
+
+    state
+        .clock
+        .advance(Duration::from_secs(MIN_DURATION_SECS + 1));
+    let b = block(
+        11,
+        vec![tx(
+            0xD3,
+            vec![],
+            vec![action(&alice.orchard, 5, false)],
+            vec![],
+        )],
+    );
+    lz_server::scanner::scan_block(&state, Arc::new(b)).await;
+    state.settle().await;
+    assert_eq!(s.page_len(), 0, "an expired lease must not match");
+    assert!(s.pushes.0.lock().unwrap().is_empty());
+    assert!(state.scanner.active_keys(state.clock.now()).is_empty());
+
+    // The API runs on the same clock: a wake dated by it renews the lease.
+    let r = s.wake(&[], lease_json(&alice, 11, "instant")).await;
+    assert_eq!(r.status, 200, "{}", r.json);
+    assert_eq!(r.json["lease"]["active"], true);
+}
+
+/// Invariant 3 on the server's own clock: the sweep deletes an
+/// unacknowledged event seven days after it was found, and the API stops
+/// returning it.
+#[tokio::test]
+async fn unacknowledged_events_are_deleted_after_seven_days() {
+    let alice = Wallet::new(1);
+    let mut s = scanning(10).await;
+    let state = s.h.state.clone();
+    s.wake(&[], lease_json(&alice, 10, "private")).await;
+    state.settle().await;
+    let b = block(
+        11,
+        vec![tx(
+            0xD4,
+            vec![],
+            vec![action(&alice.orchard, 6, false)],
+            vec![],
+        )],
+    );
+    lz_server::scanner::scan_block(&state, Arc::new(b)).await;
+    let r = s.poll("0", 0).await;
+    assert_eq!(r.json["events"].as_array().unwrap().len(), 1);
+
+    state.clock.advance(EVENT_TTL - Duration::from_secs(60));
+    lz_server::scanner::sweep(&state);
+    assert_eq!(s.page_len(), 1, "kept until seven days have passed");
+
+    state.clock.advance(Duration::from_secs(120));
+    lz_server::scanner::sweep(&state);
+    assert_eq!(s.page_len(), 0);
+    let r = s.poll("0", 0).await;
+    assert_eq!(r.status, 200, "{}", r.json);
+    assert_eq!(r.json["events"], json!([]));
 }
 
 #[tokio::test]
@@ -375,7 +455,8 @@ async fn viewing_keys_never_reach_disk_or_logs() {
         vec![],
     )];
     s.wake(&[], lease_json(&alice, 50, "instant")).await;
-    eventually(|| s.page_len() == 1).await;
+    s.h.state.settle().await;
+    assert_eq!(s.page_len(), 1);
     let b = block(
         61,
         vec![tx(
@@ -439,7 +520,7 @@ async fn mempool_payment_alerts_at_once_then_mines_without_a_second_push() {
     assert!(e["compact_tx"].is_string());
     assert_eq!(r.json["hints"], json!([]), "no hint before it is mined");
     let id = e["id"].as_str().unwrap().to_owned();
-    eventually(|| !s.pushes.0.lock().unwrap().is_empty()).await;
+    s.h.state.settle().await;
     assert_eq!(s.pushes.0.lock().unwrap().len(), 1);
 
     // Seeing it again in the mempool changes nothing.
@@ -455,7 +536,7 @@ async fn mempool_payment_alerts_at_once_then_mines_without_a_second_push() {
     assert_eq!(events[0]["status"], "mined");
     assert_eq!(events[0]["rev"], 2);
     assert_eq!(r.json["hints"], json!([{ "start": 11, "end": 12 }]));
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    s.h.state.settle().await;
     assert_eq!(
         s.pushes.0.lock().unwrap().len(),
         1,
@@ -485,10 +566,11 @@ async fn mempool_stream_is_followed_and_new_leases_see_what_is_pending() {
     assert_eq!(s.page_len(), 0);
     // ...but a new lease is checked against the pending transactions.
     s.wake(&[], lease_json(&alice, 10, "instant")).await;
-    eventually(|| s.page_len() == 1).await;
+    s.h.state.settle().await;
+    assert_eq!(s.page_len(), 1);
     let r = s.wake(&[], lease_json(&alice, 10, "instant")).await;
     assert_eq!(r.json["events"][0]["status"], "mempool");
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    s.h.state.settle().await;
     assert!(
         s.pushes.0.lock().unwrap().is_empty(),
         "catch-up matches don't push"
@@ -516,7 +598,8 @@ async fn one_push_per_transaction_and_at_most_two_a_minute() {
     let now = UNIX_EPOCH + Duration::from_secs(1_000_000);
     lz_server::scanner::scan_block_at(&s.h.state, Arc::new(block(11, vec![two])), now).await;
     assert_eq!(s.page_len(), 2);
-    eventually(|| s.pushes.0.lock().unwrap().len() == 1).await;
+    s.h.state.settle().await;
+    assert_eq!(s.pushes.0.lock().unwrap().len(), 1);
 
     // Three more payments in the same minute: only one more push, but all
     // of them reach the wallet.
@@ -527,7 +610,8 @@ async fn one_push_per_transaction_and_at_most_two_a_minute() {
         lz_server::mempool::scan_tx_at(&s.h.state, t, now).await;
     }
     assert_eq!(s.page_len(), 5);
-    eventually(|| s.pushes.0.lock().unwrap().len() == 2).await;
+    s.h.state.settle().await;
+    assert_eq!(s.pushes.0.lock().unwrap().len(), 2);
 
     // The mempool snapshot keeps one copy per txid.
     let raw = wallet::full_tx(&alice, true, false);

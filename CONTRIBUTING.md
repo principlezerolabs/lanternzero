@@ -97,6 +97,12 @@ CI checks the dependency and Rust version rules; reviewers check the first.
 - **Invariant tests.** Code that touches keys or tokens needs tests showing
   that invariants 1–6 hold for it: secrets are redacted from debug output,
   nothing persists, leases expire, sizes are fixed.
+- **Time and background work (server).** Code in a running server reads
+  the time from `AppState::clock`, never `SystemTime::now()`, and starts
+  short-lived background work (backfills, pushes, webhook deliveries)
+  with `AppState::spawn`. Tests move the clock forward to check that
+  leases and events expire, and await `AppState::settle()` before
+  checking that something did *not* happen, instead of sleeping.
 - **Test vectors.** If you change something with a vector in
   [`spec/vectors/v0.json`](spec/vectors/v0.json), regenerate it with
   `LZ_REGEN_VECTORS=1 cargo test -p lz-proto --test vectors` and explain why
