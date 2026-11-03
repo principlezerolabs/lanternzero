@@ -1,7 +1,7 @@
 # relay: design
 
 **Status:** proposal (2026-11-03). Nothing is built yet. Tracking issue:
-to be opened.
+[#9](https://github.com/principlezerolabs/lanternzero/issues/9).
 
 `lz-relay` is a small OHTTP relay (RFC 9458) for Lantern Zero gateways.
 It's meant to be run by third parties, such as community organizations:
