@@ -19,3 +19,9 @@ missing_debug_implementations = "warn"
 dbg_macro = "deny"
 print_stdout = "deny"
 print_stderr = "deny"
+
+# Tests trial-decrypt thousands of notes; unoptimized curve arithmetic
+# makes that slow. Optimize dependencies (not our crates, which keep fast
+# rebuilds and full debug info) in dev and test builds.
+[profile.dev.package."*"]
+opt-level = 2

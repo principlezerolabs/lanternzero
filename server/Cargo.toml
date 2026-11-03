@@ -66,6 +66,8 @@ serde_json = "1"
 lz-client = { path = "../client/core", features = ["reqwest"] }
 # Paused time for timing tests.
 tokio = { version = "1", features = ["test-util"] }
+# Property tests: random inputs, shrunk to a minimal failing case.
+proptest = { version = "1.12", default-features = false, features = ["std"] }
 
 [lints]
 workspace = true

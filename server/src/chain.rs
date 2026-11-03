@@ -37,8 +37,11 @@ pub const REORG_WINDOW: usize = 100;
 pub const BATCH: u64 = 50;
 /// Largest gRPC message accepted. A full 2 MB block's compact form fits.
 const MAX_MESSAGE: usize = 16 * 1024 * 1024;
-/// Longest wait between retries after an error.
-const MAX_BACKOFF: Duration = Duration::from_secs(60);
+/// First wait before retrying after an error.
+pub const MIN_BACKOFF: Duration = Duration::from_secs(1);
+/// Longest wait between retries after an error. Also the longest the
+/// follower can take to notice that its chain source is back.
+pub const MAX_BACKOFF: Duration = Duration::from_secs(60);
 
 /// A block on the best chain.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -250,7 +253,7 @@ pub fn network_of(chain_name: &str, sapling_activation: u64) -> Option<Network> 
 /// retried with back-off; the server keeps serving meanwhile.
 pub async fn run(chain: Arc<Chain>, source: Lightwalletd, network: Network, poll: Duration) {
     let mut follower = Follower::new(chain.clone(), source);
-    let mut backoff = Duration::from_secs(1);
+    let mut backoff = Backoff::default();
     let mut network_ok = false;
     let mut stall = StallWatch::new(std::time::Instant::now());
     loop {
@@ -271,17 +274,45 @@ pub async fn run(chain: Arc<Chain>, source: Lightwalletd, network: Network, poll
             })
         };
         match result {
-            Ok(Step::Behind) => backoff = Duration::from_secs(1),
+            Ok(Step::Behind) => backoff.succeeded(),
             Ok(Step::CaughtUp) => {
-                backoff = Duration::from_secs(1);
+                backoff.succeeded();
                 tokio::time::sleep(poll).await;
             }
             Err(e) => {
-                tracing::warn!(error = %e, retry_secs = backoff.as_secs(), "chain follower");
-                tokio::time::sleep(backoff).await;
-                backoff = (backoff * 2).min(MAX_BACKOFF);
+                let wait = backoff.failed();
+                tracing::warn!(error = %e, retry_secs = wait.as_secs(), "chain follower");
+                tokio::time::sleep(wait).await;
             }
         }
+    }
+}
+
+/// How long to wait before retrying the chain source: [`MIN_BACKOFF`],
+/// doubling after each failure in a row up to [`MAX_BACKOFF`], and back to
+/// the start after a success.
+#[derive(Debug)]
+pub struct Backoff {
+    next: Duration,
+}
+
+impl Default for Backoff {
+    fn default() -> Self {
+        Self { next: MIN_BACKOFF }
+    }
+}
+
+impl Backoff {
+    /// A call failed: how long to wait before the next one.
+    pub fn failed(&mut self) -> Duration {
+        let wait = self.next;
+        self.next = (self.next * 2).min(MAX_BACKOFF);
+        wait
+    }
+
+    /// A call succeeded: the next failure waits [`MIN_BACKOFF`] again.
+    pub fn succeeded(&mut self) {
+        self.next = MIN_BACKOFF;
     }
 }
 

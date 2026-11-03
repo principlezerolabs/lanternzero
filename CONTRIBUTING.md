@@ -103,6 +103,11 @@ CI checks the dependency and Rust version rules; reviewers check the first.
   with `AppState::spawn`. Tests move the clock forward to check that
   leases and events expire, and await `AppState::settle()` before
   checking that something did *not* happen, instead of sleeping.
+- **Property tests.** Code that parses bytes or text from the network or
+  a user (tokens, URLs, push messages, inner requests) gets a `proptest`
+  in the crate's `tests/properties.rs` (the server's are in
+  `tests/end_to_end/properties.rs`): it never panics, and what it encodes
+  it parses back.
 - **Test vectors.** If you change something with a vector in
   [`spec/vectors/v0.json`](spec/vectors/v0.json), regenerate it with
   `LZ_REGEN_VECTORS=1 cargo test -p lz-proto --test vectors` and explain why

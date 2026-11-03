@@ -12,6 +12,8 @@ mod accounts;
 mod client;
 #[path = "end_to_end/harness.rs"]
 mod harness;
+#[path = "end_to_end/properties.rs"]
+mod properties;
 #[path = "end_to_end/protocol.rs"]
 mod protocol;
 #[path = "end_to_end/scanning.rs"]

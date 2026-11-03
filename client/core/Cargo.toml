@@ -40,6 +40,8 @@ reqwest = ["dep:reqwest"]
 # A stand-in OHTTP gateway for the unit tests. The end-to-end tests against
 # the real server live in server/tests, which needs Rust 1.89.
 ohttp = { version = "0.8", default-features = false, features = ["client", "server", "rust-hpke"] }
+# Property tests: random inputs, shrunk to a minimal failing case.
+proptest = { version = "1.12", default-features = false, features = ["std"] }
 
 [lints]
 workspace = true

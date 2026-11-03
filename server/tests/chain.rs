@@ -245,3 +245,16 @@ fn warns_when_the_tip_stops_moving() {
         None
     );
 }
+
+/// The follower's retry waits: doubling to a cap, so a source that comes
+/// back is noticed within `MAX_BACKOFF`, and reset by any success.
+#[test]
+fn retries_back_off_to_a_cap_and_reset_on_success() {
+    use lz_server::chain::{Backoff, MIN_BACKOFF};
+    let mut b = Backoff::default();
+    let waits: Vec<_> = (0..9).map(|_| b.failed().as_secs()).collect();
+    assert_eq!(waits, [1, 2, 4, 8, 16, 32, 60, 60, 60]);
+    b.succeeded();
+    assert_eq!(b.failed(), MIN_BACKOFF);
+    assert_eq!(b.failed(), MIN_BACKOFF * 2);
+}

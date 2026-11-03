@@ -299,17 +299,20 @@ async fn token_rotation_and_account_deletion_through_the_client_core() {
     assert_ne!(new_url, old_url);
 
     // The old token works until the new one is first used, then stops.
-    let p = old.wake(now_ms(), Some(lease())).unwrap();
+    // Both copies share one device, so one replay window: give them
+    // distinct times, or two wakes in the same millisecond share a `seq`.
+    let t = now_ms();
+    let p = old.wake(t, Some(lease())).unwrap();
     let r = relay(&h, p.request()).await;
     assert!(old.finish_wake(p, reply(&r)).is_ok());
-    let p = c.wake(now_ms(), Some(lease())).unwrap();
+    let p = c.wake(t + 1, Some(lease())).unwrap();
     let r = relay(&h, p.request()).await;
     let w = c.finish_wake(p, reply(&r)).unwrap();
     assert!(
         w.lease.active,
         "the account, its device, and its lease carried over"
     );
-    let p = old.wake(now_ms(), Some(lease())).unwrap();
+    let p = old.wake(t + 2, Some(lease())).unwrap();
     let r = relay(&h, p.request()).await;
     assert_eq!(old.finish_wake(p, reply(&r)), Err(Error::Unauthorized));
 
