@@ -43,8 +43,6 @@ scanning also against real Zebra and Zaino on regtest
   the mempool's full transactions (spec §4.5); a payment the server first
   sees in a compact block has `memo: null`, because fetching the
   transaction by txid is ruled out (invariant 7).
-- **Onion reachability in `doctor`.** `doctor` checks the listen address
-  Tor forwards to, not the onion name itself, which needs a Tor client.
 - **Live account loading for `new-account`.** Accounts the CLI adds take
   effect after a restart; accounts made through the issuer socket are live
   at once.
@@ -167,7 +165,10 @@ runs.
 - **`lz-server <config> doctor`** checks the data directory's
   permissions, core dumps, memory and swap, the OHTTP key's age, the
   chain source (network and tip age), that the gateway serves this
-  server's key configuration where wallets reach it, and the clock against
+  server's key configuration where wallets reach it, that an onion
+  service answers by its name through Tor (through the Tor client in
+  `LZ_TOR_SOCKS`, which the kit sets; it warns when there is none), and
+  the clock against
   `pool.ntp.org` (one SNTP query), and prints pass, warn, or fail for
   each. Its output has no tokens, keys, URLs, or host names, so it's safe
   to paste into an issue.

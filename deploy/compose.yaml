@@ -62,6 +62,9 @@ services:
         # Tor's HiddenServicePort needs an IP address.
         ipv4_address: ${LZ_SERVER_IP:-172.30.77.10}
       chain: {}
+    environment:
+      # `doctor`'s onion check goes through the kit's Tor (README.md).
+      LZ_TOR_SOCKS: ${LZ_TOR_SOCKS-tor:9050}
     extra_hosts:
       # For byo-node with a node on this machine (LZ_LIGHTWALLETD).
       - host.docker.internal:host-gateway
@@ -80,6 +83,12 @@ services:
       - /var/lib/tor/lz
       - --HiddenServicePort
       - 80 ${LZ_SERVER_IP:-172.30.77.10}:8080
+      # A Tor client for the kit's network only, so `doctor` can reach the
+      # onion service by its name, as wallets do. Not published to the host.
+      - --SocksPort
+      - 0.0.0.0:9050
+      - --SocksPolicy
+      - accept ${LZ_SUBNET:-172.30.77.0/24}, reject *
     volumes:
       - tor-data:/var/lib/tor
     networks:

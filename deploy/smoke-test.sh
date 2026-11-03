@@ -20,6 +20,9 @@ export LZ_VAPID_CONTACT=mailto:smoke-test@example.org
 # A subnet unlikely to collide with a real kit on the same machine.
 export LZ_SUBNET=172.30.78.0/24
 export LZ_SERVER_IP=172.30.78.10
+# No Tor client for doctor: reaching the onion over the live Tor network
+# would make CI slow and flaky. `onion` then warns that it didn't check.
+export LZ_TOR_SOCKS=
 # Attach the server to the regtest chain's network, as a byo-node install
 # would reach its node.
 override=$(mktemp)
@@ -90,6 +93,7 @@ done
 # age; it must not fail.
 grep -Eq "^(pass|warn) +chain " <<<"$report" || fail "doctor: chain failed"
 grep -Eq "^pass +gateway " <<<"$report" || fail "doctor: gateway didn't pass"
+grep -Eq "^warn +onion +not checked" <<<"$report" || fail "doctor: onion should say it didn't check"
 # CI runners may block NTP, which only warns.
 grep -Eq "^(pass|warn) +clock " <<<"$report" || fail "doctor: clock failed"
 echo "ok: doctor"
@@ -107,13 +111,14 @@ fi
 "${kit[@]}" exec -T server lz-server "$config" set-chain \
   --lightwalletd http://zaino:8137 --network regtest >/dev/null 2>&1 \
   || fail "set-chain refused a working chain source"
+# Count the follower's start lines, so only one from after the restart
+# counts (log timestamps can't be trusted across Docker's VM clock).
+follows() { "${kit[@]}" logs server 2>&1 | grep -c "chain follower at tip" || true; }
+before=$(follows)
 "${kit[@]}" restart server >/dev/null
 for _ in $(seq 1 30); do
-  if "${kit[@]}" logs --since 30s server 2>&1 | grep -q "chain follower at tip"; then
-    break
-  fi
+  [ "$(follows)" -gt "$before" ] && break
   sleep 1
 done
-"${kit[@]}" logs --since 30s server 2>&1 | grep -q "chain follower at tip" \
-  || fail "the server didn't follow the new chain source"
+[ "$(follows)" -gt "$before" ] || fail "the server didn't follow the new chain source"
 echo "ok: set-chain"

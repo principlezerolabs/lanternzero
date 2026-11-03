@@ -59,6 +59,7 @@ pub async fn run(config: &Config) -> Vec<Check> {
         ohttp_key(config, unix_now()),
         chain(config).await,
         gateway(config).await,
+        onion(config).await,
         clock(TIME_SERVER).await,
     ]
 }
@@ -290,8 +291,8 @@ const GATEWAY_TIMEOUT: Duration = Duration::from_secs(15);
 /// Where the server answers wallets: as an onion service, the listen
 /// address Tor forwards to; over OHTTP, the public gateway URL relays
 /// forward to. Either must serve this server's current key configuration
-/// at `/.well-known/ohttp-gateway`. The onion name itself would need a
-/// Tor client, which the kit's Tor doesn't offer (no SOCKS port).
+/// at `/.well-known/ohttp-gateway`. The onion name itself is [`onion`]'s
+/// to check.
 pub async fn gateway(config: &Config) -> Check {
     const NAME: &str = "gateway";
     let path = crate::gateway::GATEWAY_PATH;
@@ -349,8 +350,8 @@ pub fn gateway_check(onion: bool, served: Option<&[u8]>, expected: Option<&[u8]>
         );
     }
     let detail = if onion {
-        "answers on the listen address, where Tor forwards; the onion name \
-         itself isn't checked"
+        "answers on the listen address, where Tor forwards (the onion check \
+         covers the onion name)"
     } else {
         "the public gateway answers with this server's key configuration"
     };
@@ -366,6 +367,202 @@ fn local_target(listen: SocketAddr) -> SocketAddr {
         ip => ip,
     };
     SocketAddr::new(ip, listen.port())
+}
+
+/// The Tor client `doctor` reaches the server's own onion service through,
+/// as `host:port` of a SOCKS5 port. The kit sets it to its Tor container.
+pub const TOR_SOCKS_ENV: &str = "LZ_TOR_SOCKS";
+/// How long the onion check waits. A first connection to an onion service
+/// fetches its descriptor and builds two circuits, which can take a while.
+const ONION_TIMEOUT: Duration = Duration::from_secs(120);
+/// The most of an onion response `doctor` reads.
+const ONION_MAX_RESPONSE: usize = 64 * 1024;
+
+/// For an onion service: whether wallets can reach it, through Tor, by its
+/// name. Uses the Tor client in [`TOR_SOCKS_ENV`]; without one, warns that
+/// it can't check.
+pub async fn onion(config: &Config) -> Check {
+    let socks = std::env::var(TOR_SOCKS_ENV)
+        .ok()
+        .filter(|s| !s.trim().is_empty());
+    onion_via(config, socks.as_deref(), ONION_TIMEOUT).await
+}
+
+/// [`onion`], with the Tor client and the time limit given.
+pub async fn onion_via(config: &Config, socks: Option<&str>, limit: Duration) -> Check {
+    const NAME: &str = "onion";
+    if !config.direct_api {
+        return check(
+            Status::Pass,
+            NAME,
+            "not used: wallets reach this server through OHTTP relays",
+        );
+    }
+    let Some(socks) = socks else {
+        return check(
+            Status::Warn,
+            NAME,
+            format!(
+                "not checked: no Tor client to check through (set {TOR_SOCKS_ENV}; the kit does)"
+            ),
+        );
+    };
+    let expected = match crate::ohttp_keys::read_current(&config.data_dir) {
+        Ok(Some(key)) => key.served().ok(),
+        _ => None,
+    };
+    let fetched = tokio::time::timeout(
+        limit,
+        fetch_over_socks(socks, &config.public_host, crate::gateway::GATEWAY_PATH),
+    )
+    .await;
+    // Nothing below names the onion address or the Tor client's address.
+    match fetched {
+        Err(_) => check(
+            Status::Fail,
+            NAME,
+            format!(
+                "no answer through Tor within {} s: the onion service may not be \
+                 published yet (a few minutes after Tor starts), or Tor has no network",
+                limit.as_secs()
+            ),
+        ),
+        Ok(Err(OnionError::NoTorClient)) => check(
+            Status::Fail,
+            NAME,
+            format!("can't reach the Tor client in {TOR_SOCKS_ENV}: is the tor service running?"),
+        ),
+        Ok(Err(OnionError::Unreachable)) => check(
+            Status::Fail,
+            NAME,
+            "Tor can't reach the onion service: the server may be down (see \
+             gateway), the service not published yet (a few minutes after Tor \
+             starts), or Tor without network",
+        ),
+        Ok(Err(OnionError::Protocol)) => check(
+            Status::Fail,
+            NAME,
+            "the Tor client or the onion service gave an answer doctor doesn't understand",
+        ),
+        Ok(Ok((status, _))) if status != 200 => check(
+            Status::Fail,
+            NAME,
+            format!("the onion service answered {status}"),
+        ),
+        Ok(Ok((_, body))) => match expected {
+            Some(expected) if body != expected => check(
+                Status::Fail,
+                NAME,
+                "the onion name serves another key configuration than this server's: \
+                 another server answers at that name",
+            ),
+            _ => check(
+                Status::Pass,
+                NAME,
+                "reachable through Tor by its onion name, with this server's key configuration",
+            ),
+        },
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum OnionError {
+    NoTorClient,
+    Unreachable,
+    Protocol,
+}
+
+/// `GET path` on `host` port 80 through a SOCKS5 proxy (RFC 1928, with the
+/// name resolved by the proxy). Returns the status and body.
+async fn fetch_over_socks(
+    socks: &str,
+    host: &str,
+    path: &str,
+) -> Result<(u16, Vec<u8>), OnionError> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut s = tokio::net::TcpStream::connect(socks)
+        .await
+        .map_err(|_| OnionError::NoTorClient)?;
+    let proto = |_| OnionError::Protocol;
+    // Greeting: version 5, one method, "no authentication".
+    s.write_all(&[5, 1, 0]).await.map_err(proto)?;
+    let mut reply = [0u8; 2];
+    s.read_exact(&mut reply).await.map_err(proto)?;
+    if reply != [5, 0] {
+        return Err(OnionError::Protocol);
+    }
+    let name = host.as_bytes();
+    let len = u8::try_from(name.len()).map_err(|_| OnionError::Protocol)?;
+    let mut req = vec![5, 1, 0, 3, len];
+    req.extend_from_slice(name);
+    req.extend_from_slice(&80u16.to_be_bytes());
+    s.write_all(&req).await.map_err(proto)?;
+    let mut head = [0u8; 4];
+    s.read_exact(&mut head).await.map_err(proto)?;
+    if head[0] != 5 {
+        return Err(OnionError::Protocol);
+    }
+    if head[1] != 0 {
+        // Tor answers 1 or 4, or its own 0xF0-0xF7 codes, when it can't
+        // find or reach the service.
+        return Err(OnionError::Unreachable);
+    }
+    let addr_len = match head[3] {
+        1 => 4,
+        4 => 16,
+        3 => {
+            let mut l = [0u8; 1];
+            s.read_exact(&mut l).await.map_err(proto)?;
+            usize::from(l[0])
+        }
+        _ => return Err(OnionError::Protocol),
+    };
+    let mut bound = vec![0u8; addr_len + 2];
+    s.read_exact(&mut bound).await.map_err(proto)?;
+
+    let request = format!("GET {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n");
+    s.write_all(request.as_bytes()).await.map_err(proto)?;
+    let mut response = Vec::new();
+    s.take(ONION_MAX_RESPONSE as u64 + 1)
+        .read_to_end(&mut response)
+        .await
+        .map_err(proto)?;
+    if response.len() > ONION_MAX_RESPONSE {
+        return Err(OnionError::Protocol);
+    }
+    parse_http_response(&response).ok_or(OnionError::Protocol)
+}
+
+/// The status and body of a whole HTTP/1.1 response read to its end. Only
+/// a plain body (not chunked) is understood, which is what the server sends.
+fn parse_http_response(raw: &[u8]) -> Option<(u16, Vec<u8>)> {
+    let split = raw.windows(4).position(|w| w == b"\r\n\r\n")?;
+    let head = std::str::from_utf8(&raw[..split]).ok()?;
+    let body = &raw[split + 4..];
+    let mut lines = head.split("\r\n");
+    let status: u16 = lines
+        .next()?
+        .strip_prefix("HTTP/1.1 ")?
+        .split(' ')
+        .next()?
+        .parse()
+        .ok()?;
+    let mut length = None;
+    for line in lines {
+        let (name, value) = line.split_once(':')?;
+        let name = name.trim();
+        if name.eq_ignore_ascii_case("transfer-encoding") {
+            return None;
+        }
+        if name.eq_ignore_ascii_case("content-length") {
+            length = Some(value.trim().parse::<usize>().ok()?);
+        }
+    }
+    let body = match length {
+        Some(n) => body.get(..n)?,
+        None => body,
+    };
+    Some((status, body.to_vec()))
 }
 
 /// The NTP server `doctor` asks for the time.
@@ -537,6 +734,162 @@ mod tests {
         let ahead = tip_check(5, now + 600, now);
         assert_eq!(ahead.status, Status::Warn);
         assert!(ahead.detail.contains("clock"));
+    }
+
+    /// A fake Tor SOCKS5 port: accepts one connection, checks the request
+    /// names `host:80`, answers `rep`, then (on success) `response`.
+    async fn fake_tor(host: &'static str, rep: u8, response: Vec<u8>) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        tokio::spawn(async move {
+            let (mut s, _) = listener.accept().await.unwrap();
+            let mut greeting = [0u8; 3];
+            s.read_exact(&mut greeting).await.unwrap();
+            assert_eq!(greeting, [5, 1, 0]);
+            s.write_all(&[5, 0]).await.unwrap();
+            let mut head = [0u8; 5];
+            s.read_exact(&mut head).await.unwrap();
+            assert_eq!(&head[..4], &[5, 1, 0, 3]);
+            let mut name = vec![0u8; usize::from(head[4]) + 2];
+            s.read_exact(&mut name).await.unwrap();
+            assert_eq!(&name[..name.len() - 2], host.as_bytes());
+            assert_eq!(&name[name.len() - 2..], &80u16.to_be_bytes());
+            s.write_all(&[5, rep, 0, 1, 0, 0, 0, 0, 0, 0])
+                .await
+                .unwrap();
+            if rep == 0 {
+                let mut req = vec![0u8; 512];
+                let n = s.read(&mut req).await.unwrap();
+                let req = String::from_utf8_lossy(&req[..n]).into_owned();
+                assert!(req.starts_with("GET /.well-known/ohttp-gateway HTTP/1.1\r\n"));
+                assert!(req.contains(&format!("Host: {host}\r\n")));
+                s.write_all(&response).await.unwrap();
+            }
+        });
+        addr
+    }
+
+    fn http(status: &str, body: &[u8]) -> Vec<u8> {
+        let mut r = format!(
+            "HTTP/1.1 {status}\r\ncontent-type: application/ohttp-keys\r\ncontent-length: {}\r\n\r\n",
+            body.len()
+        )
+        .into_bytes();
+        r.extend_from_slice(body);
+        r
+    }
+
+    #[tokio::test]
+    async fn onion_reachability_through_tor() {
+        const ONION: &str = "abcdefghijklmnopqrstuvwxyz234567abcdefghijklmnopqrstuvwx.onion";
+        let tmp = crate::files::TestDir::new("doctor-onion");
+        let dir = tmp.join("data");
+        let mut config: Config = toml::from_str(&format!(
+            "listen = \"127.0.0.1:0\"\npublic_host = \"{ONION}\"\ndirect_api = true\n\
+             network = \"main\"\ndata_dir = {:?}\nvapid_contact = \"mailto:a@b\"\n",
+            dir.display().to_string()
+        ))
+        .unwrap();
+        crate::ohttp_keys::load(&dir, 1_800_000_000).unwrap();
+        let served = crate::ohttp_keys::read_current(&dir)
+            .unwrap()
+            .unwrap()
+            .served()
+            .unwrap();
+        let limit = Duration::from_secs(5);
+        let hidden = |c: &Check| {
+            assert!(
+                !c.detail.contains(ONION) && !c.detail.contains("127.0.0.1"),
+                "{c}"
+            )
+        };
+
+        let ok = onion_via(
+            &config,
+            Some(&fake_tor(ONION, 0, http("200 OK", &served)).await),
+            limit,
+        )
+        .await;
+        assert_eq!(ok.status, Status::Pass, "{ok}");
+        hidden(&ok);
+
+        let other = onion_via(
+            &config,
+            Some(&fake_tor(ONION, 0, http("200 OK", b"other")).await),
+            limit,
+        )
+        .await;
+        assert_eq!(other.status, Status::Fail);
+        assert!(
+            other.detail.contains("another key configuration"),
+            "{other}"
+        );
+
+        let status = onion_via(
+            &config,
+            Some(&fake_tor(ONION, 0, http("404 Not Found", b"")).await),
+            limit,
+        )
+        .await;
+        assert_eq!(
+            (status.status, status.detail.as_str()),
+            (Status::Fail, "the onion service answered 404")
+        );
+
+        // Tor's "onion service descriptor can't be found".
+        let gone = onion_via(
+            &config,
+            Some(&fake_tor(ONION, 0xF0, Vec::new()).await),
+            limit,
+        )
+        .await;
+        assert_eq!(gone.status, Status::Fail);
+        assert!(gone.detail.contains("server may be down"), "{gone}");
+        hidden(&gone);
+
+        // Nothing listening where the Tor client should be.
+        let closed = {
+            let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            l.local_addr().unwrap().to_string()
+        };
+        let no_tor = onion_via(&config, Some(&closed), limit).await;
+        assert_eq!(no_tor.status, Status::Fail);
+        assert!(no_tor.detail.contains(TOR_SOCKS_ENV), "{no_tor}");
+        hidden(&no_tor);
+
+        // A Tor client that never answers.
+        let silent = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let silent_addr = silent.local_addr().unwrap().to_string();
+        let slow = onion_via(&config, Some(&silent_addr), Duration::from_millis(200)).await;
+        assert_eq!(slow.status, Status::Fail);
+        assert!(slow.detail.contains("no answer through Tor"), "{slow}");
+        drop(silent);
+
+        assert_eq!(onion_via(&config, None, limit).await.status, Status::Warn);
+        config.direct_api = false;
+        config.public_host = "lz.example.org".into();
+        assert_eq!(onion_via(&config, None, limit).await.status, Status::Pass);
+    }
+
+    #[test]
+    fn parses_plain_http_responses_only() {
+        assert_eq!(
+            parse_http_response(b"HTTP/1.1 200 OK\r\ncontent-length: 3\r\n\r\nabcdef"),
+            Some((200, b"abc".to_vec()))
+        );
+        assert_eq!(
+            parse_http_response(b"HTTP/1.1 200 OK\r\n\r\nall of it"),
+            Some((200, b"all of it".to_vec()))
+        );
+        for bad in [
+            &b"HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\n\r\n3\r\nabc"[..],
+            b"HTTP/1.0 200 OK\r\n\r\n",
+            b"HTTP/1.1 200 OK\r\ncontent-length: 9\r\n\r\nshort",
+            b"no header end",
+        ] {
+            assert_eq!(parse_http_response(bad), None);
+        }
     }
 
     #[test]

@@ -105,7 +105,9 @@ each image's digest; release notes will too.
 
 To use them instead of building:
 
-1. Verify each digest was signed by a tagged release of this repository:
+1. Verify each digest was signed by a tagged release of this repository,
+   with cosign 3 or newer (cosign 2 finds no signature: cosign 3 stores it
+   in Sigstore's newer bundle format):
 
    ```sh
    cosign verify ghcr.io/principlezerolabs/lantern-zero-server@sha256:<digest> \
@@ -133,8 +135,11 @@ docker compose exec server lz-server /var/lib/lantern-zero/config.toml doctor
 ```
 
 It prints pass, warn, or fail for the data directory, core dumps, memory
-and swap, the OHTTP key's age (not used by onion services), and the chain
-source. The output has no tokens, keys, URLs, or
+and swap, the OHTTP key's age (not used by onion services), the chain
+source, the gateway, whether the onion service answers by its name
+through Tor, and the clock. The onion check goes through the kit's Tor
+(a SOCKS port open only to the kit's network) and can take up to two
+minutes when Tor has just started. The output has no tokens, keys, URLs, or
 onion names, so it's safe to paste into an issue.
 
 ## Hardening (spec §6.2)

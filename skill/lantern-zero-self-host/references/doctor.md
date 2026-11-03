@@ -87,11 +87,9 @@ The node the server reads blocks from.
 Whether the server answers where wallets reach it, with its own key
 configuration.
 
-- **pass** `answers on the listen address, where Tor forwards; the onion
-  name itself isn't checked`: the server side is fine. If wallets still
-  can't connect, the onion service is the suspect: check the Tor container
-  (`docker compose logs --tail 50 tor`); it can take a few minutes after a
-  start to publish the onion service.
+- **pass** `answers on the listen address, where Tor forwards (the onion
+  check covers the onion name)`: the server side is fine; see `onion` for
+  the Tor side.
 - **pass** `the public gateway answers with this server's key
   configuration`: for servers behind OHTTP relays, which the kit doesn't
   set up yet.
@@ -106,6 +104,31 @@ configuration.
   at that address, or a cache in front of it is stale. In the kit this
   means two installs share an address (for example `LZ_SERVER_IP` reused
   in another project). Ask the user before changing anything.
+
+## `onion`
+
+Whether wallets can reach the server by its onion name, checked through
+the kit's own Tor, as a wallet would. It can take up to two minutes.
+
+- **pass** `reachable through Tor by its onion name…`: fine. If a wallet
+  still can't connect, the problem is on the wallet's side (its Tor, or
+  the URL).
+- **pass** `not used: …OHTTP relays`: not an onion service.
+- **warn** `not checked: no Tor client…`: `LZ_TOR_SOCKS` is empty. The kit
+  sets it; someone set it empty in `.env` or the environment. Nothing is
+  wrong, it just wasn't checked.
+- **FAIL** `can't reach the Tor client in LZ_TOR_SOCKS…`: the `tor`
+  container isn't running. `docker compose ps tor`, then
+  `docker compose up -d tor`.
+- **FAIL** `Tor can't reach the onion service…` or `no answer through Tor
+  within N s…`: if `gateway` failed too, the server is down; fix that
+  first. Otherwise, right after a start, Tor may not have published the
+  service yet; wait a few minutes and run `doctor` again. If it persists,
+  read `docker compose logs --tail 50 tor`: Tor needs outbound internet.
+- **FAIL** `the onion service answered N` or `…serves another key
+  configuration…`: something else answers at that name, for example a
+  second install restored from the same Tor volume. Ask the user before
+  changing anything; suggest an issue.
 
 ## `clock`
 
