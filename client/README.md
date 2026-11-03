@@ -17,9 +17,11 @@ let outcome = client.finish_wake(pending, HttpResponse { status, retry_after: No
 ```
 
 Wallet SDKs compile it into their existing native library and expose it
-through their own FFI, so the app never links a second Rust library. It
-pulls in no async runtime, no TLS stack, and no Zcash wallet crates, and it
-builds on Rust 1.89, librustzcash's own minimum.
+through their own FFI, so the app never links a second Rust library. Apps
+without a Rust library of their own use the Swift and Kotlin bindings in
+[`uniffi/`](uniffi/README.md). It pulls in no async runtime, no TLS stack,
+and no Zcash wallet crates, and it builds on Rust 1.89, librustzcash's own
+minimum.
 
 ## What it covers
 

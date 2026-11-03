@@ -78,9 +78,11 @@ Self-hosted servers on Tor don't need one.
 - **Running your own server:** the Docker Compose kit in
   [`deploy/`](deploy/README.md), or the [Claude skill](skill/README.md) that
   walks you through it.
-- **Building a wallet integration:** the Rust [client core](client/README.md),
-  which wallet SDKs compile into their own native library; the reference
-  [push gateway](gateway/README.md); and the [protocol spec](spec/v0.md).
+- **Building a wallet integration:** the Rust [client
+  core](client/README.md), which wallet SDKs compile into their own native
+  library (apps without a Rust core use its [Swift and Kotlin
+  bindings](client/uniffi/README.md)); the reference [push
+  gateway](gateway/README.md); and the [protocol spec](spec/v0.md).
 - **Merchant backends:** webhooks for payment notifications (spec §4.5).
   The client core sets one up, and `lz-proto` checks each delivery's
   signature.

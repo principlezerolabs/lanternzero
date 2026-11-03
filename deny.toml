@@ -31,6 +31,28 @@ confidence-threshold = 0.9
 # Allowed licenses no current dependency uses are fine.
 unused-allowed-license = "allow"
 
+# UniFFI (client/uniffi only) is MPL-2.0: copyleft per file, so apps may
+# link it into closed code, but changes to UniFFI's own files must be
+# shared. Allowed for these crates only, not in general.
+[[licenses.exceptions]]
+crate = "uniffi"
+allow = ["MPL-2.0"]
+[[licenses.exceptions]]
+crate = "uniffi_core"
+allow = ["MPL-2.0"]
+[[licenses.exceptions]]
+crate = "uniffi_internal_macros"
+allow = ["MPL-2.0"]
+[[licenses.exceptions]]
+crate = "uniffi_macros"
+allow = ["MPL-2.0"]
+[[licenses.exceptions]]
+crate = "uniffi_meta"
+allow = ["MPL-2.0"]
+[[licenses.exceptions]]
+crate = "uniffi_pipeline"
+allow = ["MPL-2.0"]
+
 [bans]
 multiple-versions = "warn"
 wildcards = "deny"

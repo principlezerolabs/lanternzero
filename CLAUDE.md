@@ -76,7 +76,7 @@ same copy. Treat a violation as a bug, and test for it.
 | `server/` | Chain follower, wake-up scheduler, scanner with RAM leases, hint list, long-poll and webhook endpoints, OHTTP gateway side |
 | `gateway/` | Reference push gateway (prototype): sealed, expiring, revocable endpoints; subscriptions bound to one server's VAPID key; per-device rate limits; forwards to APNs/FCM |
 | `crates/lz-proto/` | Shared protocol types from the spec: requests and responses, padding, tokens, event ids, replay window. Test vectors in `spec/vectors/` |
-| `client/` | Rust client core for wallets (`client/core`, prototype): OHTTP requests, registration, wake and leases, long-poll, acknowledgements, ping decryption. No I/O: the host app sends the bytes |
+| `client/` | Rust client core for wallets (`client/core`, prototype): OHTTP requests, registration, wake and leases, long-poll, acknowledgements, ping decryption. No I/O: the host app sends the bytes. `client/uniffi`: Swift and Kotlin bindings over it for apps without a Rust core |
 | `deploy/` | Docker Compose self-host kit: profiles `full` (Zebra, Zaino, server, Tor) and `byo-node` (server and Tor, pointed at an existing node), with hardening for spec §6.2. Plan in `deploy/DESIGN.md` |
 | `skill/` | Claude skill that guides and troubleshoots self-hosting. The Compose files and `lz-server init` do the installing; the skill runs `lz-server doctor` and never improvises configuration. |
 
@@ -95,8 +95,9 @@ same copy. Treat a violation as a bug, and test for it.
   proposed upstream in payjoin/rust-payjoin#2026.
 - **Decided (2026-10-31):**
   - **Workspace:** one Cargo workspace (`crates/lz-proto`, `server`,
-    `gateway`, `client/core`). Client-side crates (`lz-proto`, client core)
-    must not depend on `zcash_client_backend`, tokio, or a TLS stack.
+    `gateway`, `client/core`, `client/uniffi`). Client-side crates
+    (`lz-proto`, the client core, its bindings) must not depend on
+    `zcash_client_backend`, tokio, or a TLS stack.
   - **Minimum Rust (2026-11-01):** 1.89 for every crate, the same as
     librustzcash (`zcash_client_backend` 0.25, the first with Ironwood,
     needs it), so wallets embedding our client-side crates need nothing
@@ -108,6 +109,18 @@ same copy. Treat a violation as a bug, and test for it.
     through their own FFI. A second Rust static library in the same app
     risks duplicate symbols. Generate UniFFI bindings only when an app
     without a Rust core asks.
+  - **UniFFI bindings (2026-11-03):** a React Native app with no Rust core
+    has now asked (a viewing-key client, spec §1). Built: a thin
+    `client/uniffi` crate (prototype) exposing only the phone side of
+    `lz-client`, versioned with `lz-client` (pinned by commit until a tag). The app
+    builds the single static library that combines it with note
+    decryption and its PIR client (UniFFI library mode), and owns the Expo
+    Module. Move a React Native wrapper here only when a second app asks.
+    Secrets (token, viewing keys, push secrets) stay native and never
+    reach JavaScript. UniFFI is MPL-2.0, allowed in `deny.toml` for its
+    crates only. The crate denies rather than forbids `unsafe_code`
+    (generated scaffolding); `scripts/privacy-guards.sh` checks it has no
+    hand-written unsafe code.
   - **Client I/O:** sans-IO. The core builds and opens OHTTP messages; the
     app sends them with URLSession or OkHttp. An optional `reqwest` feature
     serves merchant backends and tests.

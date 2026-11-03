@@ -1,0 +1,55 @@
+[package]
+name = "lz-client-uniffi"
+version = "0.0.1"
+description = "UniFFI bindings (Swift, Kotlin) for the Lantern Zero client core, for apps without a Rust core of their own."
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+# Apps with a Rust core (wallet SDKs) don't use this crate: they compile
+# `lz-client` into their own library (see client/README.md). This one is
+# for apps that have no Rust library yet. An app that also needs other
+# Rust code (note decryption, a PIR client) builds one static library that
+# depends on this crate and those, and generates bindings for all of them
+# at once in UniFFI's library mode, so there is still only one Rust library
+# in the app.
+[lib]
+crate-type = ["lib", "staticlib", "cdylib"]
+
+[dependencies]
+lz-client = { path = "../core" }
+serde_json = "1"
+thiserror = "2"
+zeroize = "1.8"
+# No default features: `cargo-metadata` is only for generating bindings.
+uniffi = { version = "0.32", default-features = false }
+
+[features]
+# The `uniffi-bindgen` binary (`src/bin/uniffi-bindgen.rs`). Only for
+# generating the Swift and Kotlin sources, never linked into an app.
+bindgen = ["uniffi/cli", "uniffi/cargo-metadata"]
+
+[[bin]]
+name = "uniffi-bindgen"
+required-features = ["bindgen"]
+
+[dev-dependencies]
+# The same stand-in OHTTP gateway as client/core's tests.
+bhttp = "0.8"
+lz-proto = { path = "../../crates/lz-proto" }
+ohttp = { version = "0.8", default-features = false, features = ["client", "server", "rust-hpke"] }
+
+# The workspace forbids unsafe code. UniFFI's scaffolding is generated
+# `extern "C"` code, so this crate can't forbid it; it denies it instead,
+# which the generated code overrides locally. Hand-written unsafe stays out
+# (`scripts/privacy-guards.sh` checks this crate has none).
+[lints.rust]
+unsafe_code = "deny"
+missing_debug_implementations = "warn"
+
+[lints.clippy]
+dbg_macro = "deny"
+print_stdout = "deny"
+print_stderr = "deny"
