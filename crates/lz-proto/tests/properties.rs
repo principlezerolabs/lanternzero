@@ -21,10 +21,13 @@ fn texty() -> impl Strategy<Value = String> {
     ]
 }
 
-/// A host, port and path a server could be configured with.
+/// A host, port and path a server could be configured with. No `--` in
+/// hosts: a label like `xn--` is (invalid) punycode, which the URL parser
+/// rightly refuses.
 fn server() -> impl Strategy<Value = (String, Option<u16>, String)> {
     (
-        "[a-z][a-z0-9-]{0,15}(\\.[a-z][a-z0-9-]{0,15}){0,3}(\\.onion)?",
+        "[a-z][a-z0-9-]{0,15}(\\.[a-z][a-z0-9-]{0,15}){0,3}(\\.onion)?"
+            .prop_filter("no punycode-like labels", |h: &String| !h.contains("--")),
         proptest::option::of(1u16..),
         "(/[a-z0-9_-]{1,10}){0,3}",
     )
