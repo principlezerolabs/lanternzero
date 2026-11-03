@@ -4,7 +4,9 @@
 //! could aim it at internal services. The HTTP client resolves names through
 //! [`SafeResolver`], which drops disallowed addresses, so the check holds at
 //! connect time and DNS rebinding can't get around it. Literal IP hosts skip
-//! DNS, so [`check_url`] rejects disallowed ones before any request.
+//! DNS, so [`check_url`] rejects disallowed ones before any request. It reads
+//! the host the way the HTTP client will (WHATWG URL rules), which also
+//! reads `2130706433`, `0x7f.1`, and `0177.0.0.1` as `127.0.0.1`.
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
@@ -111,15 +113,22 @@ pub fn check_url(
     Ok(())
 }
 
-/// The lowercase host of an `https` URL (or `http`, for local tests only).
+/// The host of an `https` URL (or `http`, for local tests only), as the
+/// HTTP client will read it: a lowercase name, an IPv4 address in dotted
+/// form, or a bracketed IPv6 address. The client parses URLs by WHATWG
+/// rules, which read other IPv4 spellings (`2130706433`, `0x7f.1`) as
+/// addresses and then connect without asking the resolver, so the checks
+/// must see the address, not the spelling. The URL must also be a valid
+/// URI, as before.
 fn url_host(endpoint: &str, allow_http: bool) -> Option<String> {
-    let uri: http::Uri = endpoint.parse().ok()?;
-    match uri.scheme_str() {
-        Some("https") => {}
-        Some("http") if allow_http => {}
+    let _: http::Uri = endpoint.parse().ok()?;
+    let url = reqwest::Url::parse(endpoint).ok()?;
+    match url.scheme() {
+        "https" => {}
+        "http" if allow_http => {}
         _ => return None,
     }
-    Some(uri.host()?.to_ascii_lowercase())
+    Some(url.host_str()?.to_ascii_lowercase())
 }
 
 #[cfg(test)]
@@ -195,5 +204,32 @@ mod tests {
             check_url("http://push.example.app/", false, none),
             Err(TargetError::Invalid)
         );
+    }
+
+    #[test]
+    fn checks_the_address_the_client_will_connect_to() {
+        let none: &[String] = &[];
+        // Spellings of 127.0.0.1 and 169.254.169.254 that the HTTP client
+        // reads as those addresses.
+        for spelling in [
+            "https://2130706433/x",
+            "https://0x7f.0.0.1/x",
+            "https://127.1/x",
+            "https://0177.0.0.1/x",
+            "https://0x7F000001/x",
+            "https://2852039166/latest",
+            "https://[0:0::1]/x",
+            "https://[::ffff:7f00:1]/x",
+        ] {
+            assert_eq!(
+                check_url(spelling, false, none),
+                Err(TargetError::PrivateAddress),
+                "{spelling}"
+            );
+        }
+        // An allow-list entry matches the host as the client reads it.
+        let list = vec!["127.0.0.1".to_owned()];
+        assert_eq!(check_url("https://2130706433/x", true, &list), Ok(()));
+        assert_eq!(check_url("https://8.8.8.8/x", false, none), Ok(()));
     }
 }
