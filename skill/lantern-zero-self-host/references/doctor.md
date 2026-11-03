@@ -61,8 +61,8 @@ The node the server reads blocks from.
 - **warn** `…: still syncing, or stalled`: the newest block is over 20
   minutes old. Normal while a node syncs (`full`: days). If it stays at one
   height:
-  - near mainnet height 3,543,405 with Zaino, it's the NU7 stall in
-    `deploy/README.md`;
+  - near mainnet height 3,543,405 with Zaino, it's the NU7 stall: use the
+    fallback in `deploy/README.md`, "Zaino and NU7";
   - otherwise check the node itself (`docker compose logs --tail 50 zaino`
     or `zebra` for `full`, or the user's own node).
 - **warn** `tip … in the future: check this machine's clock`: the clock is

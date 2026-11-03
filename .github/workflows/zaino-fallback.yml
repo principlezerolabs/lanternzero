@@ -1,0 +1,78 @@
+# The NU7 fallback: Zaino built from the pinned commit in deploy/zaino/,
+# run against the regtest suite on the normal chain and on one that
+# activates NU7 at height 10. Unlike ci.yml's `regtest-nu7` canary (Zaino's
+# released image, allowed to fail until a fixed release), this must pass.
+name: Zaino NU7 fallback
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - deploy/zaino/**
+      - deploy/regtest/**
+      - server/src/chain.rs
+      - server/src/mempool.rs
+      - server/src/scanner/**
+      - server/tests/regtest.rs
+      - .github/workflows/zaino-fallback.yml
+  pull_request:
+    paths:
+      - deploy/zaino/**
+      - deploy/regtest/**
+      - server/src/chain.rs
+      - server/src/mempool.rs
+      - server/src/scanner/**
+      - server/tests/regtest.rs
+      - .github/workflows/zaino-fallback.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  LZ_ZAINO_IMAGE: lantern-zero/zainod:nu7
+  LZ_ZAINO_PLATFORM: linux/amd64
+
+jobs:
+  regtest:
+    name: regtest (${{ matrix.chain }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - chain: normal
+            zebra_config: zebrad.toml
+            nu7: ""
+          - chain: nu7
+            zebra_config: zebrad-nu7.toml
+            nu7: "1"
+    env:
+      ZEBRA_CONFIG: ${{ matrix.zebra_config }}
+      NU7: ${{ matrix.nu7 }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      # Layer-cached: while the pinned commit and the Dockerfile stay the
+      # same, later runs skip the Zaino build.
+      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: deploy/zaino
+          tags: ${{ env.LZ_ZAINO_IMAGE }}
+          load: true
+          cache-from: type=gha,scope=zaino-fallback
+          cache-to: type=gha,scope=zaino-fallback,mode=max
+      - run: rustup toolchain install stable --profile minimal
+      - run: docker compose -f deploy/regtest/compose.yaml up -d --wait
+      # The NU7 test runs whenever LZ_REGTEST_NU7 is set, even empty: set it
+      # only for the NU7 chain.
+      - run: |
+          if [ -n "$NU7" ]; then export LZ_REGTEST_NU7=1; fi
+          cargo +stable test -p lz-server --test regtest --locked -- --ignored --test-threads 1
+      - if: failure()
+        run: docker compose -f deploy/regtest/compose.yaml logs --tail 200
+      - if: always()
+        run: docker compose -f deploy/regtest/compose.yaml down

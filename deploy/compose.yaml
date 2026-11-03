@@ -131,10 +131,11 @@ services:
 
   zaino:
     profiles: [full]
-    # zingodevops/zainod:0.10.1-no-tls. It stops at NU7 until
-    # zingolabs/zaino#1731 is fixed; see deploy/README.md.
-    image: zingodevops/zainod@sha256:c8428a39d510fd59a9182a5e19cf473d6af6a4b6a672aff8b1a690e9c23c17b9
-    platform: linux/amd64
+    # zingodevops/zainod:0.10.1-no-tls. It stops at NU7 until a fixed
+    # release; LZ_ZAINO_IMAGE switches to the fallback built from zaino/
+    # (README.md, "Zaino and NU7").
+    image: ${LZ_ZAINO_IMAGE:-zingodevops/zainod@sha256:c8428a39d510fd59a9182a5e19cf473d6af6a4b6a672aff8b1a690e9c23c17b9}
+    platform: ${LZ_ZAINO_PLATFORM:-linux/amd64}
     restart: unless-stopped
     command: ["start", "--config", "/etc/zaino/zainod.toml"]
     volumes:

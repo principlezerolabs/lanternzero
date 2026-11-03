@@ -25,11 +25,35 @@ With no profile you get **`byo-node`**: point `LZ_LIGHTWALLETD` at the
 Zaino or lightwalletd you already run. That's the better choice for anyone
 with a node, because a mainnet sync takes days.
 
-> **`full` and NU7.** Zaino 0.10.x stops indexing at NU7 (mainnet height
-> 3,543,405, around 5 Nov 2026; zingolabs/zaino#1731). Until a fixed Zaino
-> is pinned here, `full` stalls there. It also hasn't been tried on mainnet
-> yet: the Zaino volume's ownership and Zebra's sync on this config are
-> untested.
+> **Zaino and NU7.** Zaino's released images (0.10.x) stop indexing at NU7,
+> mainnet height 3,543,405, around 5 Nov 2026 (zingolabs/zaino#1731). Until
+> a release with the fix ships, use the fallback below, for `full` and for
+> your own Zaino alike. `full` also hasn't been tried on mainnet yet.
+
+### The NU7 fallback
+
+[`zaino/Dockerfile`](zaino/Dockerfile) builds Zaino from one pinned commit
+of its fix (zingolabs/zaino#1655, not yet merged), with pinned base images
+and packages. CI runs the regtest suite against it on a normal chain and
+across NU7 (`.github/workflows/zaino-fallback.yml`). Build it on this
+machine; it isn't published, and it compiles Zaino from source, so it
+takes a while:
+
+```sh
+docker build -t lantern-zero/zainod:nu7 zaino
+```
+
+- **`full`:** set `LZ_ZAINO_IMAGE=lantern-zero/zainod:nu7` in `.env`, and
+  `LZ_ZAINO_PLATFORM` to this machine's platform (`linux/amd64` or
+  `linux/arm64`; the image is built natively, so no emulation). Then
+  `docker compose up -d`. Zaino may rebuild its index; Zebra's synced
+  chain is kept.
+- **Your own Zaino (`byo-node`):** run this image in place of yours with
+  your own config, or build the same commit from source. The server needs
+  no change.
+
+Once Zaino ships a fixed release, the kit pins it and this fallback goes
+away.
 
 ## Set up
 
@@ -136,5 +160,5 @@ that reason, and has no network.
 | `.env.example` | Options; copy to `.env` (git ignores it). No secrets |
 | `server.Dockerfile` | Server image, built from the repository root |
 | `tor/` | Tor image and `torrc`; the `tor` package is pinned to a version in a fixed Debian snapshot |
-| `zebra/`, `zaino/` | Node configs for `full` |
+| `zebra/`, `zaino/` | Node configs for `full`; `zaino/Dockerfile` builds the NU7 fallback |
 | `smoke-test.sh` | `byo-node` end to end against `regtest/`: `init`, hardening, `doctor` |

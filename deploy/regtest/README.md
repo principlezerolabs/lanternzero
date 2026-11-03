@@ -44,6 +44,20 @@ handles the upgrade, and so does our server: its follower just sees the tip
 stop, and warns after 10 minutes. A CI canary job (`regtest-nu7`, allowed to
 fail) runs this test, so a fixed Zaino shows up as soon as it's pinned here.
 
+**The fallback.** `deploy/zaino/Dockerfile` builds Zaino from a pinned
+commit of the fix (zingolabs/zaino#1655). To run the kit with it:
+
+```sh
+docker build -t lantern-zero/zainod:nu7 deploy/zaino
+export LZ_ZAINO_IMAGE=lantern-zero/zainod:nu7 LZ_ZAINO_PLATFORM=linux/arm64  # or linux/amd64
+ZEBRA_CONFIG=zebrad-nu7.toml docker compose -f deploy/regtest/compose.yaml up -d --wait
+LZ_REGTEST_NU7=1 cargo test -p lz-server --test regtest -- --ignored --test-threads 1
+```
+
+CI does the same on both chains (`zaino-fallback.yml`), and that one must
+pass. Leave `LZ_REGTEST_NU7` unset on the normal chain: the NU7 test runs
+whenever it is set.
+
 ## Notes
 
 - **Activation heights.** Zebra 7.0.0 activates only Canopy on regtest by

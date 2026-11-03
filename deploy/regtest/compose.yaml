@@ -34,9 +34,11 @@ services:
         condition: service_healthy
 
   zaino:
-    # zingodevops/zainod:0.10.1-no-tls
-    image: zingodevops/zainod@sha256:c8428a39d510fd59a9182a5e19cf473d6af6a4b6a672aff8b1a690e9c23c17b9
-    platform: linux/amd64
+    # zingodevops/zainod:0.10.1-no-tls, which stops at NU7 (README.md). For
+    # the NU7 fallback built from deploy/zaino/, set
+    #   LZ_ZAINO_IMAGE=lantern-zero/zainod:nu7 LZ_ZAINO_PLATFORM=<this host's, e.g. linux/arm64>
+    image: ${LZ_ZAINO_IMAGE:-zingodevops/zainod@sha256:c8428a39d510fd59a9182a5e19cf473d6af6a4b6a672aff8b1a690e9c23c17b9}
+    platform: ${LZ_ZAINO_PLATFORM:-linux/amd64}
     command: ["start", "--config", "/etc/zaino/zainod.toml"]
     volumes:
       - ./zainod.toml:/etc/zaino/zainod.toml:ro

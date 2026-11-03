@@ -85,14 +85,17 @@ Building the images needs about 5 GB free, on top of what the node uses.
 
 - **`byo-node` (default, recommended):** the user already runs Zebra with
   Zaino, or lightwalletd, on this machine or a private network. Only the
-  server and Tor run here. Ask which Zaino version they run: the NU7 stall
-  noted below for `full` hits their own Zaino too if it's affected, and
-  then the server stops seeing blocks when their node does.
+  server and Tor run here. Ask which Zaino version they run: while the
+  "Zaino and NU7" note is in `deploy/README.md`, Zaino's released images
+  stop at NU7 (mainnet height 3,543,405), and then the server stops seeing
+  blocks when their node does. Point them to the fallback described there.
 - **`full`:** runs Zebra and Zaino here too. Needs about 500 GB free and
-  days to sync mainnet. Zaino images are amd64 only, so on arm64 it runs
-  slowly under emulation. Check the "`full` and NU7" note in
-  `deploy/README.md`: while it is there, `full` stops syncing at NU7
-  (mainnet height 3,543,405), so steer mainnet users to `byo-node`.
+  days to sync mainnet. Zaino's own images are amd64 only, so on arm64 they
+  run slowly under emulation. While the NU7 note is there, set up `full`
+  with the fallback image it describes (`LZ_ZAINO_IMAGE`,
+  `LZ_ZAINO_PLATFORM`), which is also native on arm64. Building it compiles
+  Zaino from source: tell the user it takes a while and needs several GB
+  of free disk.
 
 ### 3. Fill in `.env`
 
