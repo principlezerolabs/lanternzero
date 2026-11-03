@@ -82,13 +82,9 @@ gh release create vX.Y.Z --title "Lantern Zero vX.Y.Z" --notes-file notes.md
 
 Then, in one commit on `main`, make the new digests the kit's defaults:
 the `${LZ_SERVER_IMAGE:-…}` and `${LZ_TOR_IMAGE:-…}` defaults in
-`deploy/compose.yaml`, and the examples in `deploy/.env.example`. Run
-`deploy/smoke-test.sh`; it builds locally, so also start the kit once with
-the pinned images.
-
-The first time, this also changes the kit from building to pulling:
-`deploy/README.md`'s "Set up" uses `docker compose pull` and `up
---no-build`, local builds set `LZ_SERVER_IMAGE=lantern-zero/server:local`
-and `LZ_TOR_IMAGE=lantern-zero/tor:local`, and so do `smoke-test.sh` and
-the skill. A digest can't be a build tag, so a pinned default can't be
-built over.
+`deploy/compose.yaml`. Run
+`deploy/smoke-test.sh`, which builds from the checkout, and
+`PINNED=1 deploy/smoke-test.sh`, which pulls the newly pinned images.
+(v0.1.0 changed the kit from building to pulling. Local builds set
+`LZ_SERVER_IMAGE` and `LZ_TOR_IMAGE` to local tags, since a digest can't
+name an image you build.)

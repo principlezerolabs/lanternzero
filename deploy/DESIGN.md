@@ -3,8 +3,8 @@
 **Status:** proposal (2026-10-31). Layer 1 is a prototype (2026-11-01):
 `lz-server init` and `doctor`, and the Compose kit with both profiles and
 the §6.2 hardening, tested on regtest by `smoke-test.sh`, `set-chain`, and
-`doctor`'s onion check through the kit's Tor. The release workflow for
-signed images works (test run 2026-11-03; no release yet). Not built yet:
+`doctor`'s onion check through the kit's Tor. v0.1.0 (2026-11-03)
+published the first signed images, and the kit pins them. Not built yet:
 layers 3 and 4.
 
 Packaging is not the hard part of self-hosting Lantern Zero. Two other
@@ -123,7 +123,7 @@ A short "Compose on any VPS" page covers this case.
 - Container images are signed (cosign keyless, by the release workflow's
   GitHub identity) and published to `ghcr.io/principlezerolabs` with an
   SBOM and provenance, for amd64 and arm64. The kit pins images by digest,
-  never `latest`; until the first release it builds them locally.
+  never `latest`; setting local tags in `.env` builds them instead.
 - Updates are opt-in: the scanner holds viewing keys, so nothing
   auto-updates. Release notes say whether a release touches key handling.
 - `curl | sh` is never the only install path. If a script exists, it only

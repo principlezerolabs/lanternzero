@@ -118,17 +118,19 @@ Then set, with the user (show the change before writing it):
 (troubleshooting.md). Still, confirm both with the user now: which network
 the node is on, and the exact host and port of its gRPC API.
 
-### 4. Build, then have the user run `init`
+### 4. Get the images, then have the user run `init`
 
 ```sh
-docker compose build
+docker compose pull server tor
 ```
 
-If the user wants the published images instead, follow "Published images"
-in `deploy/README.md`: verify each digest with `cosign verify`, set
-`LZ_SERVER_IMAGE` and `LZ_TOR_IMAGE` to the `@sha256:` references, run
-`docker compose pull server tor` instead of `build`, and add `--no-build`
-to `docker compose up`. Never set them to a tag.
+This fetches the latest release's signed images, which `compose.yaml`
+pins by digest. If `cosign` (3 or newer) is installed, offer to check
+them with the command in "Published images" in `deploy/README.md`. If
+the user would rather build the images, follow "Build the images
+yourself" there: set `LZ_SERVER_IMAGE` and `LZ_TOR_IMAGE` in `.env` to the
+local tags, then `docker compose build`, and drop `--no-build` below.
+Never set them to a tag on the registry.
 
 Then ask the user to run this **in their own terminal** (rule 1):
 
@@ -143,7 +145,7 @@ and tells you when that's done, without pasting it to you.
 ### 5. Start and check
 
 ```sh
-docker compose up -d
+docker compose up -d --no-build
 docker compose exec server lz-server /var/lib/lantern-zero/config.toml doctor
 ```
 

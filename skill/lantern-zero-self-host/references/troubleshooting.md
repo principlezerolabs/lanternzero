@@ -18,7 +18,12 @@ already on this host. In `.env`, pick a free private /24 and set both:
 **`docker compose version` older than 2.20**, or errors about `required`
 under `depends_on`: update Docker Compose.
 
-**Build fails**: show the last lines of `docker compose build`. Disk full
+**Pull fails**: show the last lines of `docker compose pull server tor`.
+Usually the network, or GitHub's registry being down; try again later.
+Never switch to a tag to work around it.
+
+**Build fails** (only when `.env` sets local image tags): show the last
+lines of `docker compose build`. Disk full
 is the most common cause (`df -h`); `docker builder prune` frees build
 cache after asking the user. Otherwise suggest an issue with the output.
 

@@ -43,12 +43,15 @@ Then, if the user agrees:
 
 ```sh
 git pull
-docker compose build
-docker compose up -d
+docker compose pull server tor
+docker compose up -d --no-build
 docker compose exec server lz-server /var/lib/lantern-zero/config.toml doctor
 ```
 
-The data volumes carry over; wallets keep their URLs.
+`git pull` brings the new release's digests in `compose.yaml`. If `.env`
+sets `LZ_SERVER_IMAGE` and `LZ_TOR_IMAGE` (the user builds the images),
+run `docker compose build` and `docker compose up -d` instead. The data
+volumes carry over; wallets keep their URLs.
 
 ## Key rotation
 

@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
-# Smoke test for the self-hosting kit's byo-node profile: builds the images,
-# runs `init` against the regtest chain in deploy/regtest (as the "existing
+# Smoke test for the self-hosting kit's byo-node profile: builds the images
+# from this checkout (or, with PINNED=1, pulls the release images that
+# compose.yaml pins), runs `init` against the regtest chain in deploy/regtest (as the "existing
 # node"), starts the server with the kit's hardening, and runs `doctor`.
 # It doesn't reach the onion service over the Tor network, which would be
 # slow and flaky in CI. Needs Docker; CI runs it.
 #
 #   deploy/smoke-test.sh          # leaves nothing behind
 #   KEEP=1 deploy/smoke-test.sh   # keeps the kit running to look at
+#   PINNED=1 deploy/smoke-test.sh # the pinned release images (RELEASING.md)
 set -euo pipefail
 cd "$(dirname "$0")"
 
@@ -17,6 +19,11 @@ export LZ_NETWORK=regtest
 # host.docker.internal: on Linux that can't reach ports bound to 127.0.0.1.
 export LZ_LIGHTWALLETD=http://lz-regtest-zaino-1:8137
 export LZ_VAPID_CONTACT=mailto:smoke-test@example.org
+# Local tags, so `build` doesn't try to tag the build with a digest.
+if [[ "${PINNED:-}" != 1 ]]; then
+  export LZ_SERVER_IMAGE=lantern-zero/server:local
+  export LZ_TOR_IMAGE=lantern-zero/tor:local
+fi
 # A subnet unlikely to collide with a real kit on the same machine.
 export LZ_SUBNET=172.30.78.0/24
 export LZ_SERVER_IP=172.30.78.10
@@ -55,7 +62,11 @@ fail() {
 }
 
 docker compose -p lz-regtest -f regtest/compose.yaml up -d --wait
-"${kit[@]}" build
+if [[ "${PINNED:-}" == 1 ]]; then
+  "${kit[@]}" pull server tor
+else
+  "${kit[@]}" build
+fi
 
 # `init` starts Tor first and waits for the onion hostname.
 out=$("${kit[@]}" run --rm -T init) || fail "init failed"

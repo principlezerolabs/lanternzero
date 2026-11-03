@@ -7,8 +7,8 @@ service, plus Zebra and Zaino if you don't already run a node.
 chain for the server's integration tests.
 
 **Status: prototype.** The `byo-node` profile works end to end on regtest
-(`smoke-test.sh`, run by CI). Releases will publish signed images (below);
-none is published yet, so for now you build them here. Not yet: mainnet
+(`smoke-test.sh`, run by CI). The kit uses the signed images of the
+latest release (below), or you can build them here. Not yet: mainnet
 testing, and an OHTTP setup in the kit. The plan is
 in [`DESIGN.md`](DESIGN.md).
 
@@ -46,7 +46,7 @@ docker build -t lantern-zero/zainod:nu7 zaino
 - **`full`:** set `LZ_ZAINO_IMAGE=lantern-zero/zainod:nu7` in `.env`, and
   `LZ_ZAINO_PLATFORM` to this machine's platform (`linux/amd64` or
   `linux/arm64`; the image is built natively, so no emulation). Then
-  `docker compose up -d`. Zaino may rebuild its index; Zebra's synced
+  `docker compose up -d --no-build`. Zaino may rebuild its index; Zebra's synced
   chain is kept.
 - **Your own Zaino (`byo-node`):** run this image in place of yours with
   your own config, or build the same commit from source. The server needs
@@ -60,10 +60,13 @@ away.
 ```sh
 cd deploy
 cp .env.example .env              # set LZ_VAPID_CONTACT, and LZ_LIGHTWALLETD or COMPOSE_PROFILES=full
-docker compose build              # the server and Tor images
+docker compose pull server tor    # the release's signed images; to check them, see "Published images"
 docker compose run --rm init      # starts Tor, then prints your connection URL once
-docker compose up -d
+docker compose up -d --no-build
 ```
+
+`--no-build` makes sure Compose never builds over the pinned images; to
+build them yourself instead, see "Build the images yourself".
 
 Paste the connection URL into your wallet the way you would a custom
 lightwalletd server. It holds your account token, so treat it like a
@@ -100,26 +103,23 @@ docker compose run --rm init --network test --onion-hostname-file /tor/lz/hostna
 Each tagged release publishes both images for amd64 and arm64 to GitHub's
 container registry, signed with [cosign](https://docs.sigstore.dev/)
 (keyless, by the release workflow `.github/workflows/images.yml`) and with
-an SBOM and build provenance attached. The workflow's run summary lists
-each image's digest; release notes will too.
+an SBOM and build provenance attached. The release notes list each image's
+digest, and `compose.yaml` pins the latest release's by default.
 
-To use them instead of building:
+To check that the pinned images were signed by a tagged release of this
+repository, use cosign 3 or newer (cosign 2 finds no signature: cosign 3
+stores it in Sigstore's newer bundle format), with the digests from
+`compose.yaml`:
 
-1. Verify each digest was signed by a tagged release of this repository,
-   with cosign 3 or newer (cosign 2 finds no signature: cosign 3 stores it
-   in Sigstore's newer bundle format):
+```sh
+cosign verify ghcr.io/principlezerolabs/lantern-zero-server@sha256:<digest> \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  --certificate-identity-regexp '^https://github\.com/principlezerolabs/lanternzero/\.github/workflows/images\.yml@refs/tags/v'
+```
 
-   ```sh
-   cosign verify ghcr.io/principlezerolabs/lantern-zero-server@sha256:<digest> \
-     --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-     --certificate-identity-regexp '^https://github\.com/principlezerolabs/lanternzero/\.github/workflows/images\.yml@refs/tags/v'
-   ```
-
-   Do the same for `lantern-zero-tor`.
-2. Set `LZ_SERVER_IMAGE` and `LZ_TOR_IMAGE` in `.env` to the full
-   `…@sha256:<digest>` references. Never use a tag: digests can't change.
-3. Run `docker compose pull server tor` instead of `docker compose build`,
-   and `docker compose up -d --no-build` instead of `docker compose up -d`.
+Do the same for `lantern-zero-tor`. To pin other release images, set
+`LZ_SERVER_IMAGE` and `LZ_TOR_IMAGE` in `.env` to their full
+`…@sha256:<digest>` references. Never use a tag: digests can't change.
 
 To see what an image contains:
 
@@ -127,6 +127,18 @@ To see what an image contains:
 docker buildx imagetools inspect ghcr.io/principlezerolabs/lantern-zero-server@sha256:<digest> \
   --format '{{ json .SBOM }}'
 ```
+
+### Build the images yourself
+
+Set local tags in `.env` (a digest can't name an image you build):
+
+```sh
+LZ_SERVER_IMAGE=lantern-zero/server:local
+LZ_TOR_IMAGE=lantern-zero/tor:local
+```
+
+Then run `docker compose build` in place of `docker compose pull server
+tor`, and `docker compose up -d` without `--no-build`.
 
 ## Check it
 

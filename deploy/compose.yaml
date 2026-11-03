@@ -1,9 +1,9 @@
 # Lantern Zero self-hosting kit (deploy/README.md, deploy/DESIGN.md).
 #
 #   cp .env.example .env        # then edit it
-#   docker compose build
+#   docker compose pull server tor
 #   docker compose run --rm init  # starts Tor first
-#   docker compose up -d
+#   docker compose up -d --no-build
 #
 # With no profile this is `byo-node`: the server and Tor, pointed at a
 # Zebra/Zaino or lightwalletd you already run (LZ_LIGHTWALLETD). With
@@ -30,11 +30,12 @@ x-hardening: &hardening
     - no-new-privileges:true
   logging: *logging
 
-# Built here by default. To use the published, signed images instead, set
-# LZ_SERVER_IMAGE and LZ_TOR_IMAGE in .env to their digests (README.md,
-# "Published images").
+# The signed images of the latest release, pinned by digest (README.md,
+# "Published images"). To build them here instead, set LZ_SERVER_IMAGE and
+# LZ_TOR_IMAGE in .env to local tags (README.md, "Build the images
+# yourself"): a digest can't name an image you build.
 x-server-image: &server-image
-  image: ${LZ_SERVER_IMAGE:-lantern-zero/server:local}
+  image: ${LZ_SERVER_IMAGE:-ghcr.io/principlezerolabs/lantern-zero-server@sha256:bf36066e3ec02181a3d0a83e9c7aea42d00cbae7f5e850ef8ab2e4b5a1cb815a}
   build:
     context: ..
     dockerfile: deploy/server.Dockerfile
@@ -75,7 +76,7 @@ services:
 
   tor:
     <<: *hardening
-    image: ${LZ_TOR_IMAGE:-lantern-zero/tor:local}
+    image: ${LZ_TOR_IMAGE:-ghcr.io/principlezerolabs/lantern-zero-tor@sha256:e454adc2b49b6123725f5d7223dfea7055278dea561e2a8bd08a359a8075e419}
     build: tor
     restart: unless-stopped
     command:
