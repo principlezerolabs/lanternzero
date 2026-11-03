@@ -95,6 +95,27 @@ async fn handles_a_shorter_best_chain() {
     assert_eq!(h.chain.tip(), 8);
 }
 
+/// A regtest node recreated from scratch: a new chain from genesis, first
+/// lower than ours, then mined past it. Seen in the phone push test.
+#[tokio::test]
+async fn follows_a_chain_restarted_from_genesis() {
+    let mut h = harness().await;
+    h.build(1, 25, 1);
+    h.sync().await;
+    h.build(1, 5, 2);
+    let events = h.sync().await;
+    let gone: Vec<_> = (1..=25).rev().map(|n| format!("-{n}")).collect();
+    let back: Vec<_> = (1..=5).map(|n| format!("+{n}")).collect();
+    assert_eq!(events, [gone, back].concat());
+    assert_eq!(h.chain.tip(), 5);
+
+    h.build(6, 25, 2);
+    let events = h.sync().await;
+    assert_eq!(events.first().unwrap(), "+6");
+    assert_eq!(events.last().unwrap(), "+30");
+    assert_eq!(h.chain.tip(), 30);
+}
+
 #[tokio::test]
 async fn same_height_replacement_is_caught_at_the_next_block() {
     let mut h = harness().await;
