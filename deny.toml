@@ -1,14 +1,26 @@
 # cargo-deny policy. Wallets embed our client-side crates, so a bad
 # dependency becomes their problem. Run `cargo deny check`.
 
+# Every feature of our crates, so optional code people still run is
+# checked too: the bindings generator (`lz-client-uniffi`'s `bindgen`) and
+# `lz-client`'s `reqwest`. The same set as CI, whose cargo-deny-action
+# passes `--all-features`.
 [graph]
-all-features = false
+all-features = true
 
 [advisories]
 version = 2
 # Fail on any RustSec advisory (vulnerable, unmaintained, unsound, yanked).
 # To accept one, add its id here with a comment explaining why.
-ignore = []
+ignore = [
+    # `basic-toml` is unmaintained (informational, no vulnerability, no
+    # fixed version). It reaches us only through askama's proc-macro
+    # (askama_derive, the latest 0.16.1), inside UniFFI's bindings
+    # generator (`bindgen` feature): it runs in the compiler while the
+    # generator builds, on UniFFI's own templates, and is never linked
+    # into an app. Drop this when askama or uniffi_bindgen stops using it.
+    { id = "RUSTSEC-2026-0374", reason = "build-time only, in the UniFFI bindings generator; no fix exists" },
+]
 
 [licenses]
 version = 2
@@ -51,6 +63,14 @@ crate = "uniffi_meta"
 allow = ["MPL-2.0"]
 [[licenses.exceptions]]
 crate = "uniffi_pipeline"
+allow = ["MPL-2.0"]
+# The bindings generator (`bindgen` feature only): it writes the Swift and
+# Kotlin sources and is never linked into an app.
+[[licenses.exceptions]]
+crate = "uniffi_bindgen"
+allow = ["MPL-2.0"]
+[[licenses.exceptions]]
+crate = "uniffi_udl"
 allow = ["MPL-2.0"]
 
 [bans]
