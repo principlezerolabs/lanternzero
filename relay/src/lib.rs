@@ -212,7 +212,7 @@ impl AppState {
     fn allowed_target(&self, origin: &Origin) -> bool {
         let g = &self.config.gateways;
         let host = origin.host();
-        if g.deny.iter().any(|h| h == host) {
+        if g.deny.iter().any(|h| denies(h, host)) {
             return false;
         }
         if !g.allow.is_empty() && !g.allow.iter().any(|h| h == host) {
@@ -225,6 +225,19 @@ impl AppState {
             && (origin.port() == 443 || g.ports.contains(&origin.port()));
         port_ok && origin.ip().is_none_or(ssrf::is_public)
     }
+}
+
+/// True if the deny-list entry `entry` covers `host`: the same host, or,
+/// for a name, any name under it, so `example.org` also denies
+/// `api.example.org`. Both are in canonical form (`config::Config::check`,
+/// `origin::Origin::parse`), and a host never has a trailing dot.
+fn denies(entry: &str, host: &str) -> bool {
+    host == entry
+        || (entry.parse::<IpAddr>().is_err()
+            && host.parse::<IpAddr>().is_err()
+            && host
+                .strip_suffix(entry)
+                .is_some_and(|rest| rest.ends_with('.')))
 }
 
 pub fn router(state: Arc<AppState>) -> Router {
@@ -526,9 +539,42 @@ pub fn log_filter(default: &str) -> tracing_subscriber::EnvFilter {
 mod tests {
     use super::*;
 
+    #[test]
+    fn deny_entries_cover_names_under_them() {
+        for (entry, host, want) in [
+            ("example.org", "example.org", true),
+            ("example.org", "api.example.org", true),
+            ("example.org", "a.b.example.org", true),
+            ("example.org", "badexample.org", false),
+            ("example.org", "example.org.evil", false),
+            ("api.example.org", "example.org", false),
+            ("127.0.0.1", "127.0.0.1", true),
+            // Addresses match only exactly, not as a suffix.
+            ("0.0.1", "127.0.0.1", false),
+            ("1.2.3", "10.1.2.3", false),
+            ("::1", "::1", true),
+        ] {
+            assert_eq!(denies(entry, host), want, "{entry} vs {host}");
+        }
+    }
+
     fn state(extra: &str) -> Arc<AppState> {
         let config = Config::parse(&format!("listen = \"127.0.0.1:0\"\n{extra}")).unwrap();
         AppState::new(config).unwrap()
+    }
+
+    #[tokio::test]
+    async fn deny_list_covers_a_whole_domain() {
+        let s = state("[gateways]\ndeny = [\"Example.ORG.\"]");
+        for denied in [
+            "https://example.org",
+            "https://api.example.org",
+            "sub.api.example.org",
+        ] {
+            assert!(!s.allowed_target(&origin(denied)), "{denied}");
+        }
+        assert!(s.allowed_target(&origin("https://example.net")));
+        assert!(s.allowed_target(&origin("https://notexample.org")));
     }
 
     fn origin(s: &str) -> Origin {

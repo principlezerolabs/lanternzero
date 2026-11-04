@@ -109,7 +109,7 @@ no path, query, or credentials.
 | `limits.concurrent` | 10 | Requests in flight at once from one client. Long-polls are held up to 30 seconds. |
 | `gateways.ports` | none | Ports other than 443 that servers may use. Some self-hosted servers use another port; add it if their operator asks. |
 | `gateways.allow` | none | If set, only these server hosts (which must also opt in). |
-| `gateways.deny` | none | Never these server hosts. |
+| `gateways.deny` | none | Never these server hosts, nor any name under them (`example.org` also covers `api.example.org`). If you run a Lantern Zero server yourself, list it here. |
 | `trusted_proxies` | Caddy's address | Whose `X-Forwarded-For` names the client. Change it only with the network (below). |
 
 Restart after a change: `docker compose restart relay`, or

@@ -78,7 +78,8 @@ starting point for making relays easy to host.
   Lantern Zero purpose (`lz_proto::OHTTP_PURPOSE`). It caches the answer
   (yes for 24 hours, no for 1 hour). A self-hosted server needs nothing
   from the relay operator. Operators may also set an allow list (only
-  these gateways) or a deny list.
+  these gateways) or a deny list (never these, nor names under them, so
+  an operator can deny its own domain whole).
 - **What the caches show.** Both caches are shared by all clients, so a
   client can tell from timing whether some client used a gateway within
   the cache time. That says only that a public server has users, never

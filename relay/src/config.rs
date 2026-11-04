@@ -39,7 +39,9 @@ pub struct GatewaysConfig {
     /// If set, forward only to these hosts (which must also opt in).
     #[serde(default)]
     pub allow: Vec<String>,
-    /// Never forward to these hosts.
+    /// Never forward to these hosts, or to any name under them:
+    /// `example.org` also denies `api.example.org`. (`allow` matches
+    /// exact hosts only.)
     #[serde(default)]
     pub deny: Vec<String>,
     /// Ports besides 443 that gateways may use.
@@ -132,9 +134,12 @@ impl Config {
                     "a gateway host in `allow` or `deny` is not a host name or address",
                 )
             })?;
+            // A trailing dot (`example.org.`) names the same host; gateway
+            // origins never have one.
             *host = canonical
                 .trim_start_matches('[')
                 .trim_end_matches(']')
+                .trim_end_matches('.')
                 .to_owned();
         }
         Ok(())
@@ -175,6 +180,9 @@ mod tests {
         .unwrap();
         assert_eq!(c.gateways.allow, ["lz.example.org", "2001:db8::1", "::1"]);
         assert_eq!(c.gateways.deny, ["bad.example", "127.0.0.1"]);
+        let c = Config::parse("listen = \"0.0.0.0:8080\"\n[gateways]\ndeny = [\"Example.org.\"]")
+            .unwrap();
+        assert_eq!(c.gateways.deny, ["example.org"]);
         assert!(
             Config::parse("listen = \"0.0.0.0:8080\"\n[gateways]\ndeny = [\"https://x/\"]")
                 .is_err()

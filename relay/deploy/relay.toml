@@ -23,5 +23,7 @@ ports = []
 # Only these gateway hosts (they must also opt in). Empty: any gateway
 # that declares the Lantern Zero purpose.
 allow = []
-# Never these gateway hosts.
+# Never these gateway hosts, nor any name under them: "example.org"
+# also denies "api.example.org". List the servers you run yourself here:
+# a relay must never carry traffic to its own operator's server.
 deny = []
