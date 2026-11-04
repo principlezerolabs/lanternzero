@@ -48,9 +48,12 @@ docker compose up -d --no-build
 docker compose exec server lz-server /var/lib/lantern-zero/config.toml doctor
 ```
 
-`git pull` brings the new release's digests in `compose.yaml`. If `.env`
-sets `LZ_SERVER_IMAGE` and `LZ_TOR_IMAGE` (the user builds the images),
-run `docker compose build` and `docker compose up -d` instead. The data
+`git pull` brings the new release's digests in `compose.yaml`. Check
+`.env` before pulling images. If it sets `LZ_SERVER_IMAGE` and
+`LZ_TOR_IMAGE` to `ghcr.io` digests (the v0.1.0 `.env.example`
+suggested it), those lines hold the install on that release; offer to
+delete them so the kit's pins apply. If they name images the user
+builds, run `docker compose build` and `docker compose up -d` instead. The data
 volumes carry over; wallets keep their URLs.
 
 ## Key rotation
