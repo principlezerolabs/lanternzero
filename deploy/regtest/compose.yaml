@@ -1,4 +1,7 @@
 # A private regtest chain (Zebra + Zaino) for the server's integration tests.
+# deploy/regtest/test.sh runs them on a chain of its own. Or, for a chain
+# that stays up (on ports 18232 and 8137 unless LZ_REGTEST_ZEBRA_PORT and
+# LZ_REGTEST_ZAINO_PORT say otherwise; empty means Docker picks):
 #   docker compose -f deploy/regtest/compose.yaml up -d --wait
 #   cargo test -p lz-server --test regtest -- --ignored --test-threads 1
 #   docker compose -f deploy/regtest/compose.yaml down
@@ -14,7 +17,7 @@ services:
       # ZEBRA_CONFIG=zebrad-nu7.toml activates NU7 at height 10 (see README).
       - ./${ZEBRA_CONFIG:-zebrad.toml}:/home/zebra/.config/zebrad.toml:ro
     ports:
-      - "127.0.0.1:18232:18232"
+      - "127.0.0.1:${LZ_REGTEST_ZEBRA_PORT-18232}:18232"
     healthcheck:
       test: ["CMD-SHELL", "curl -sf -H 'content-type: application/json' -d '{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"getblockchaininfo\",\"params\":[]}' http://127.0.0.1:18232"]
       interval: 2s
@@ -43,7 +46,7 @@ services:
     volumes:
       - ./zainod.toml:/etc/zaino/zainod.toml:ro
     ports:
-      - "127.0.0.1:8137:8137"
+      - "127.0.0.1:${LZ_REGTEST_ZAINO_PORT-8137}:8137"
     depends_on:
       seed:
         condition: service_completed_successfully

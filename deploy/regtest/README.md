@@ -5,12 +5,26 @@ integration tests against real software, not the fake chain source the
 other tests use. Not a self-hosting kit, and never for real funds.
 
 ```sh
-docker compose -f deploy/regtest/compose.yaml up -d --wait
+deploy/regtest/test.sh
+```
+
+It starts a chain of its own (a Compose project named for the run, on
+ports Docker picks), runs the tests, prints the chain's logs if one
+fails, and removes the chain. So it neither collides with nor tears down
+a chain already running on this machine. Arguments go to the test
+binary (`deploy/regtest/test.sh follower_tracks_the_real_tip`); `KEEP=1`
+keeps the chain. CI runs it on every push.
+
+For a chain that stays up, for example to point a server at by hand:
+
+```sh
+docker compose -f deploy/regtest/compose.yaml up -d --wait   # Zebra on 18232, Zaino on 8137
 cargo test -p lz-server --test regtest -- --ignored --test-threads 1
 docker compose -f deploy/regtest/compose.yaml down
 ```
 
-CI runs the same steps on every push.
+`LZ_REGTEST_ZEBRA_PORT` and `LZ_REGTEST_ZAINO_PORT` change the ports; the
+tests then need `LZ_REGTEST_ZEBRA` and `LZ_REGTEST_LWD` (the URLs).
 
 ## What the tests check
 
@@ -29,8 +43,7 @@ NU7 activates on mainnet at height 3,543,405. To test across the upgrade,
 start the kit with the NU7 variant, which activates it at height 10:
 
 ```sh
-ZEBRA_CONFIG=zebrad-nu7.toml docker compose -f deploy/regtest/compose.yaml up -d --wait
-LZ_REGTEST_NU7=1 cargo test -p lz-server --test regtest -- --ignored --test-threads 1 crosses_the_nu7_boundary
+ZEBRA_CONFIG=zebrad-nu7.toml LZ_REGTEST_NU7=1 deploy/regtest/test.sh crosses_the_nu7_boundary
 ```
 
 **Known failure (2026-11-01):** Zaino 0.10.1 and 0.10.2 stop at the last
@@ -50,8 +63,7 @@ commit of the fix (zingolabs/zaino#1655). To run the kit with it:
 ```sh
 docker build -t lantern-zero/zainod:nu7 deploy/zaino
 export LZ_ZAINO_IMAGE=lantern-zero/zainod:nu7 LZ_ZAINO_PLATFORM=linux/arm64  # or linux/amd64
-ZEBRA_CONFIG=zebrad-nu7.toml docker compose -f deploy/regtest/compose.yaml up -d --wait
-LZ_REGTEST_NU7=1 cargo test -p lz-server --test regtest -- --ignored --test-threads 1
+ZEBRA_CONFIG=zebrad-nu7.toml LZ_REGTEST_NU7=1 deploy/regtest/test.sh
 ```
 
 CI does the same on both chains (`zaino-fallback.yml`), and that one must

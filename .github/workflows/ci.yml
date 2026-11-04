@@ -58,12 +58,9 @@ jobs:
         with:
           persist-credentials: false
       - run: rustup toolchain install stable --profile minimal
-      - run: docker compose -f deploy/regtest/compose.yaml up -d --wait
-      - run: cargo +stable test -p lz-server --test regtest --locked -- --ignored --test-threads 1
-      - if: failure()
-        run: docker compose -f deploy/regtest/compose.yaml logs --tail 200
-      - if: always()
-        run: docker compose -f deploy/regtest/compose.yaml down
+      - run: deploy/regtest/test.sh
+        env:
+          CARGO_FLAGS: --locked
 
   # Canary: the same tests on a regtest chain that activates NU7 at height
   # 10. Zaino 0.10.x can't parse NU7 blocks yet (zingolabs/zaino#1731),
@@ -79,12 +76,9 @@ jobs:
         with:
           persist-credentials: false
       - run: rustup toolchain install stable --profile minimal
-      - run: docker compose -f deploy/regtest/compose.yaml up -d --wait
-      - run: cargo +stable test -p lz-server --test regtest --locked -- --ignored --test-threads 1 crosses_the_nu7_boundary
-      - if: failure()
-        run: docker compose -f deploy/regtest/compose.yaml logs --tail 50 zaino
-      - if: always()
-        run: docker compose -f deploy/regtest/compose.yaml down
+      - run: deploy/regtest/test.sh crosses_the_nu7_boundary
+        env:
+          CARGO_FLAGS: --locked
 
   # The self-hosting kit's byo-node profile against the regtest chain:
   # image builds, `init`, hardening, and `doctor` (deploy/smoke-test.sh).

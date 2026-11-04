@@ -151,12 +151,12 @@ Optional binaries for a full local match to CI lint:
 [`typos`](https://github.com/crate-ci/typos) (`cargo install typos-cli --locked`).
 
 If you change the chain follower, scanner, or mempool code, also run the
-regtest tests against real Zebra and Zaino (needs Docker; CI runs them too):
+regtest tests against real Zebra and Zaino (needs Docker; CI runs them too).
+This starts a chain of its own, so it won't disturb one already running
+(see [`deploy/regtest`](deploy/regtest/README.md)):
 
 ```sh
-docker compose -f deploy/regtest/compose.yaml up -d --wait
-cargo test -p lz-server --test regtest -- --ignored --test-threads 1
-docker compose -f deploy/regtest/compose.yaml down
+deploy/regtest/test.sh
 ```
 
 Keep pull requests focused, and fill in the checklist in the template.

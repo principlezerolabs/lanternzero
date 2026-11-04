@@ -66,13 +66,10 @@ jobs:
           cache-from: type=gha,scope=zaino-fallback
           cache-to: type=gha,scope=zaino-fallback,mode=max
       - run: rustup toolchain install stable --profile minimal
-      - run: docker compose -f deploy/regtest/compose.yaml up -d --wait
       # The NU7 test runs whenever LZ_REGTEST_NU7 is set, even empty: set it
       # only for the NU7 chain.
       - run: |
           if [ -n "$NU7" ]; then export LZ_REGTEST_NU7=1; fi
-          cargo +stable test -p lz-server --test regtest --locked -- --ignored --test-threads 1
-      - if: failure()
-        run: docker compose -f deploy/regtest/compose.yaml logs --tail 200
-      - if: always()
-        run: docker compose -f deploy/regtest/compose.yaml down
+          deploy/regtest/test.sh
+        env:
+          CARGO_FLAGS: --locked
