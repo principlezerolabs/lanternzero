@@ -91,10 +91,6 @@ In one commit on `main`, make the new digests the defaults: the
 builds set the image variables to local tags, since a digest can't name
 an image you build.)
 
-The first release with a relay image also changes the relay's Compose
-example from building to pulling, as v0.1.0 did for the kit:
-`relay/README.md`'s Set up and Updating steps, and `.env.example`.
-
 Then:
 
 ```sh

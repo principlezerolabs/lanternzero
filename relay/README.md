@@ -57,8 +57,8 @@ This page is for those operators.
 git clone https://github.com/principlezerolabs/lanternzero
 cd lanternzero/relay/deploy
 cp .env.example .env          # set LZ_RELAY_DOMAIN
-docker compose build relay
-docker compose up -d
+docker compose pull relay     # the release's signed image; to check it, see "The image"
+docker compose up -d --no-build
 ```
 
 Caddy gets a certificate for `LZ_RELAY_DOMAIN` within a minute or so.
@@ -149,12 +149,22 @@ and run the relay image on its own. Your proxy must:
 
 ## The image
 
-The next release will publish
-`ghcr.io/principlezerolabs/lantern-zero-relay`, signed in this
-repository's release workflow, and `compose.yaml` will pin it by digest,
-as the self-hosting kit does (`deploy/README.md`, "Published images",
-says how to check a signature). Until then, `docker compose build relay`
-builds it from your checkout, which is what the Set up steps do.
+Each release from v0.1.2 on publishes
+`ghcr.io/principlezerolabs/lantern-zero-relay` for amd64 and arm64,
+signed in this repository's release workflow, and `compose.yaml` pins
+the latest by digest, as the self-hosting kit does. To check the
+signature, with cosign 3 or newer and the digest from `compose.yaml`:
+
+```sh
+cosign verify ghcr.io/principlezerolabs/lantern-zero-relay@sha256:<digest> \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  --certificate-identity-regexp '^https://github\.com/principlezerolabs/lanternzero/\.github/workflows/images\.yml@refs/tags/v'
+```
+
+To build it yourself instead, set `LZ_RELAY_IMAGE=lantern-zero/relay:local`
+in `.env`, then `docker compose build relay` and `docker compose up -d`.
+`--no-build` in the steps above makes sure Compose never builds over the
+pinned image.
 
 The image is distroless and runs as a non-root user; the Compose
 example adds a read-only file system and drops every Linux capability.
@@ -165,11 +175,12 @@ holds client addresses.
 
 ```sh
 git pull
-docker compose build relay
-docker compose up -d
+docker compose pull relay
+docker compose up -d --no-build
 ```
 
-Caddy's certificates are kept in the `caddy-data` volume across
+If you build the image yourself, run `docker compose build relay` and
+`docker compose up -d` instead. Caddy's certificates are kept in the `caddy-data` volume across
 updates. Don't remove it with `down -v`, or Caddy asks for new
 certificates and may hit Let's Encrypt's rate limits.
 

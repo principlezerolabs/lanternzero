@@ -35,7 +35,7 @@ x-hardening: &hardening
 # LZ_TOR_IMAGE in .env to local tags (README.md, "Build the images
 # yourself"): a digest can't name an image you build.
 x-server-image: &server-image
-  image: ${LZ_SERVER_IMAGE:-ghcr.io/principlezerolabs/lantern-zero-server@sha256:f9a99a324a328ba8b0393f7ea2878a04601ebb0c165ab882f120f6e545ee1f0b}
+  image: ${LZ_SERVER_IMAGE:-ghcr.io/principlezerolabs/lantern-zero-server@sha256:3198d4d057bf8495a6f5534b1091eaa88521345a3024840705776090c8061679}
   build:
     context: ..
     dockerfile: deploy/server.Dockerfile
@@ -76,7 +76,7 @@ services:
 
   tor:
     <<: *hardening
-    image: ${LZ_TOR_IMAGE:-ghcr.io/principlezerolabs/lantern-zero-tor@sha256:15a5500f44604203065b20d2586a6ef7e2095172b01a2a4f6d89cb480ad15619}
+    image: ${LZ_TOR_IMAGE:-ghcr.io/principlezerolabs/lantern-zero-tor@sha256:4af47e6445fd623c2360999a2a2e9c678dff5f40acf802a4e11ce60aa3eed386}
     build: tor
     restart: unless-stopped
     command:

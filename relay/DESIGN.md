@@ -2,11 +2,11 @@
 
 **Status:** prototype (2026-11-03). The crate does what this page
 describes, with tests against a fake gateway and end to end with
-`lz-server` and `lz-client`. Packaged: the image (`Dockerfile`, built
-and signed by the Images workflow from the next release on), the
-Compose example with Caddy (`deploy/`, tested in CI by
-`deploy/smoke-test.sh`), and the operator README. Not yet: a published
-image, and a listing in `spec/relays.md`. Tracking issue:
+`lz-server` and `lz-client`. Packaged: the image (`Dockerfile`, signed
+and published by the Images workflow since v0.1.2), the Compose example
+with Caddy (`deploy/`, tested in CI by `deploy/smoke-test.sh`), and the
+operator README. Running at `relay.lanternzero.com` since 2026-11-04.
+Not yet: a listing in `spec/relays.md`. Tracking issue:
 [#9](https://github.com/principlezerolabs/lanternzero/issues/9).
 
 `lz-relay` is a small OHTTP relay (RFC 9458) for Lantern Zero gateways.

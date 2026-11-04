@@ -1,8 +1,8 @@
 # lz-relay behind Caddy (relay/README.md).
 #
 #   cp .env.example .env        # then set LZ_RELAY_DOMAIN
-#   docker compose build relay
-#   docker compose up -d
+#   docker compose pull relay
+#   docker compose up -d --no-build
 #
 # Caddy terminates TLS and passes each request to the relay over a
 # small private network, where Caddy has a fixed address: the one
@@ -55,7 +55,11 @@ services:
 
   relay:
     <<: *hardening
-    image: ${LZ_RELAY_IMAGE:-lantern-zero/relay:local}
+    # The signed image of the latest release, pinned by digest
+    # (README.md, "The image"). To build it here instead, set
+    # LZ_RELAY_IMAGE in .env to a local tag: a digest can't name an image
+    # you build.
+    image: ${LZ_RELAY_IMAGE:-ghcr.io/principlezerolabs/lantern-zero-relay@sha256:84b8bc008edf11049e01f42e04a3b9984b1874cc5afc0e64e58adc1996161b2a}
     build:
       context: ../..
       dockerfile: relay/Dockerfile
