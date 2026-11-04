@@ -1,0 +1,30 @@
+# Added to ../compose.yaml by ../smoke-test.sh. Paths are relative to
+# ../compose.yaml.
+services:
+  caddy:
+    ports: !reset []
+    volumes: !override
+      # ../Caddyfile plus `local_certs`, written by ../smoke-test.sh.
+      - ${LZ_SMOKE_CADDYFILE:?run ../smoke-test.sh}:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+  relay:
+    volumes: !override
+      # ../relay.toml plus a plain-http fake gateway, written by
+      # ../smoke-test.sh.
+      - ${LZ_SMOKE_RELAY_TOML:?run ../smoke-test.sh}:/etc/lz-relay/relay.toml:ro
+  gateway:
+    # python:3.13.12-alpine
+    image: python@sha256:bb1f2fdb1065c85468775c9d680dcd344f6442a2d1181ef7916b60a623f11d40
+    command: ["python", "-u", "/gateway.py"]
+    read_only: true
+    networks: [relay]
+    volumes:
+      - ./smoke/gateway.py:/gateway.py:ro
+  client: &client
+    # curlimages/curl:8.17.0
+    image: curlimages/curl@sha256:935d9100e9ba842cdb060de42472c7ca90cfe9a7c96e4dacb55e79e560b3ff40
+    entrypoint: ["sleep", "infinity"]
+    networks: [relay]
+  # A second client, from another address: its own rate limit.
+  other-client: *client

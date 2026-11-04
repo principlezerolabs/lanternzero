@@ -2,8 +2,11 @@
 
 **Status:** prototype (2026-11-03). The crate does what this page
 describes, with tests against a fake gateway and end to end with
-`lz-server` and `lz-client`. Not yet: the image, the Compose example
-with Caddy, and the operator README. Tracking issue:
+`lz-server` and `lz-client`. Packaged: the image (`Dockerfile`, built
+and signed by the Images workflow from the next release on), the
+Compose example with Caddy (`deploy/`, tested in CI by
+`deploy/smoke-test.sh`), and the operator README. Not yet: a published
+image, and a listing in `spec/relays.md`. Tracking issue:
 [#9](https://github.com/principlezerolabs/lanternzero/issues/9).
 
 `lz-relay` is a small OHTTP relay (RFC 9458) for Lantern Zero gateways.
@@ -129,10 +132,20 @@ starting point for making relays easy to host.
   digest.
 - **TLS** comes from a reverse proxy in the example Compose file: Caddy,
   pinned by digest, which gets certificates on its own and writes no
-  access log unless told to. The relay trusts `X-Forwarded-For` only
-  from that proxy, and only for rate limits. The README tells operators
-  who use another proxy to turn its access log off, because that log
-  would hold every client IP.
+  access log unless told to. Its error log does name the client and the
+  path of each request it fails, so the Caddyfile leaves that logger
+  out. The relay trusts `X-Forwarded-For` only from that proxy, and only
+  for rate limits. The README tells operators who use another proxy to
+  keep client addresses and request paths out of its access and error
+  logs, because they would otherwise hold every client's IP.
+- **Network.** Caddy and the relay share a small private network where
+  Caddy has a fixed address, the one `trusted_proxies` names; other
+  containers get addresses from a separate range, so none can take it.
+  (Running the relay in Caddy's network namespace, on loopback, was
+  simpler but broke whenever Caddy restarted.)
+- **Caddy version.** 2.11.7 or newer: 2.11.6 added idle timeouts that
+  cut off some held responses. The smoke test holds answers for 38
+  seconds over HTTP/1.1 and HTTP/2 to catch that kind of change.
 - `relay/README.md` is for operators: what the relay sees, what it keeps
   (nothing about clients), what to publish (contact, retention), and how
   to be listed in `spec/relays.md`.
@@ -178,6 +191,8 @@ starting point for making relays easy to host.
 - Spec §9, question 1 points to `lz-relay`; `spec/relays.md` names it as
   relay software.
 - CLAUDE.md's "Where things go" table gets a `relay/` row.
+- The Images workflow builds and signs `lantern-zero-relay` with the
+  kit's images; CI runs `relay/deploy/smoke-test.sh`.
 
 ## Prior art
 

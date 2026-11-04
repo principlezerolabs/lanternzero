@@ -1,0 +1,79 @@
+# lz-relay behind Caddy (relay/README.md).
+#
+#   cp .env.example .env        # then set LZ_RELAY_DOMAIN
+#   docker compose build relay
+#   docker compose up -d
+#
+# Caddy terminates TLS and passes each request to the relay over a
+# small private network, where Caddy has a fixed address: the one
+# relay.toml trusts for X-Forwarded-For. Neither writes a log line about
+# a client. The relay publishes no ports.
+name: lz-relay
+
+x-logging: &logging
+  # stdout only, size-capped. Neither service logs client addresses,
+  # gateway origins, or request bodies.
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+x-hardening: &hardening
+  read_only: true
+  cap_drop: [ALL]
+  security_opt:
+    - no-new-privileges:true
+  restart: unless-stopped
+  logging: *logging
+
+services:
+  caddy:
+    <<: *hardening
+    # caddy:2.11.7. 2.11.6 cut off some held responses (its release
+    # notes); don't go below 2.11.7.
+    image: caddy@sha256:36c24ad91a7ff7bc4c87fe22bfa8df3c4b18da0773d73fc12ee2c52b98c0bb7e
+    # The image's binary carries the capability to bind ports below
+    # 1024, and won't start without it. It's the only one kept.
+    cap_add: [NET_BIND_SERVICE]
+    environment:
+      LZ_RELAY_DOMAIN: ${LZ_RELAY_DOMAIN:?set LZ_RELAY_DOMAIN in .env}
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      # Certificates and the ACME account. Keep it across upgrades, or
+      # Caddy asks for new certificates and may hit rate limits.
+      - caddy-data:/data
+      - caddy-config:/config
+    tmpfs:
+      - /tmp
+    networks:
+      relay:
+        ipv4_address: 172.30.250.2
+
+  relay:
+    <<: *hardening
+    image: ${LZ_RELAY_IMAGE:-lantern-zero/relay:local}
+    build:
+      context: ../..
+      dockerfile: relay/Dockerfile
+    volumes:
+      - ./relay.toml:/etc/lz-relay/relay.toml:ro
+    networks: [relay]
+
+networks:
+  # Other containers get addresses from ip_range, so none can take
+  # Caddy's. If this subnet clashes with one you use, change it here,
+  # Caddy's address above, and trusted_proxies in relay.toml, all
+  # together.
+  relay:
+    ipam:
+      config:
+        - subnet: 172.30.250.0/28
+          ip_range: 172.30.250.8/29
+
+volumes:
+  caddy-data:
+  caddy-config:

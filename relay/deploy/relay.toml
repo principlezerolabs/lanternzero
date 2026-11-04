@@ -1,0 +1,27 @@
+# lz-relay configuration for the Compose example (relay/README.md).
+# The relay's port is reachable only on the Compose file's private
+# network, where Caddy is the only other container.
+listen = "0.0.0.0:8080"
+
+# Caddy's fixed address on that network (compose.yaml). The rightmost
+# X-Forwarded-For it sets is the client's address, even if the client
+# sent one of its own. Used for rate limits only; never logged or
+# forwarded.
+trusted_proxies = ["172.30.250.2"]
+
+# Requests per client address (an IPv4 address or an IPv6 /64). A wallet
+# makes a few requests per wake, and holds at most one or two long-polls
+# open.
+[limits]
+per_minute = 60
+concurrent = 10
+
+[gateways]
+# Ports besides 443 that gateways may use. Self-hosted servers sometimes
+# serve on another port; add it here if a server operator asks.
+ports = []
+# Only these gateway hosts (they must also opt in). Empty: any gateway
+# that declares the Lantern Zero purpose.
+allow = []
+# Never these gateway hosts.
+deny = []

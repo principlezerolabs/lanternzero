@@ -96,6 +96,16 @@ jobs:
           persist-credentials: false
       - run: bash deploy/smoke-test.sh
 
+  # The relay's Compose example: the image build, Caddy in front, held
+  # answers, headers, rate limits, and logs (relay/deploy/smoke-test.sh).
+  relay-compose:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: bash relay/deploy/smoke-test.sh
+
   # Advisories, licenses, banned crates and features (including ohttp's
   # nss and unsafe-print-secrets), and sources. Policy: deny.toml.
   cargo-deny:

@@ -1,8 +1,9 @@
 # Releasing
 
 A release is a version tag on `main`. The tag publishes the self-hosting
-kit's signed images (`.github/workflows/images.yml`); the kit then pins
-their digests. The Rust crates aren't published (`publish = false`).
+kit's signed images and the relay's (`.github/workflows/images.yml`);
+the Compose files then pin their digests. The Rust crates aren't
+published (`publish = false`).
 
 Updates are opt-in for self-hosters, because the server holds viewing keys
 for anyone who turns on scanning (`deploy/DESIGN.md`, "Releases"). So
@@ -53,8 +54,8 @@ git tag -a vX.Y.Z -m "Lantern Zero vX.Y.Z"   # -s instead of -a to sign it, with
 git push origin vX.Y.Z
 ```
 
-The push starts the Images workflow. Its run summary lists both images'
-digests. The images are tagged `X.Y.Z` and `sha-<commit>`, never `latest`.
+The push starts the Images workflow. Its run summary lists each image's
+digest. The images are tagged `X.Y.Z` and `sha-<commit>`, never `latest`.
 
 ## 4. Verify
 
@@ -68,23 +69,36 @@ docker buildx imagetools inspect ghcr.io/principlezerolabs/lantern-zero-server@s
 ```
 
 `imagetools inspect` should list `linux/amd64` and `linux/arm64`. Do the
-same for `lantern-zero-tor`. Then add both full `…@sha256:` references, and
-the verify command, to the release notes' "Images" section.
+same for `lantern-zero-tor` and `lantern-zero-relay`. Then add the full
+`…@sha256:` references, and the verify command, to the release notes'
+"Images" section.
 
 The packages must be public for self-hosters to pull them (the
-organization's package settings on GitHub; once per package).
+organization's package settings on GitHub; once per package, so once
+more for `lantern-zero-relay` after the first release that has it).
 
-## 5. Publish the notes, then pin the kit
+## 5. Pin the images, then publish the notes
+
+Pin first: the notes' update steps (`git pull`, then pull the images)
+only get the new images once the pins are on `main`.
+
+In one commit on `main`, make the new digests the defaults: the
+`${LZ_SERVER_IMAGE:-…}` and `${LZ_TOR_IMAGE:-…}` defaults in
+`deploy/compose.yaml`, and `${LZ_RELAY_IMAGE:-…}` in
+`relay/deploy/compose.yaml`. Run `deploy/smoke-test.sh` and
+`relay/deploy/smoke-test.sh`, which build from the checkout, and
+`PINNED=1` with each, which pulls the newly pinned images. (Local
+builds set the image variables to local tags, since a digest can't name
+an image you build.)
+
+The first release with a relay image also changes the relay's Compose
+example from building to pulling, as v0.1.0 did for the kit:
+`relay/README.md`'s Set up and Updating steps, and `.env.example`.
+
+Then:
 
 ```sh
-gh release create vX.Y.Z --title "Lantern Zero vX.Y.Z" --notes-file notes.md
+gh release create vX.Y.Z --prerelease --title "Lantern Zero vX.Y.Z" --notes-file notes.md
 ```
 
-Then, in one commit on `main`, make the new digests the kit's defaults:
-the `${LZ_SERVER_IMAGE:-…}` and `${LZ_TOR_IMAGE:-…}` defaults in
-`deploy/compose.yaml`. Run
-`deploy/smoke-test.sh`, which builds from the checkout, and
-`PINNED=1 deploy/smoke-test.sh`, which pulls the newly pinned images.
-(v0.1.0 changed the kit from building to pulling. Local builds set
-`LZ_SERVER_IMAGE` and `LZ_TOR_IMAGE` to local tags, since a digest can't
-name an image you build.)
+(`--prerelease` while Lantern Zero is pre-alpha.)

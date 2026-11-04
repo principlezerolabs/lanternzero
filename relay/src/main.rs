@@ -12,8 +12,11 @@ const TOTALS_EVERY: Duration = Duration::from_secs(3600);
 
 #[tokio::main]
 async fn main() -> ExitCode {
+    // Colors only on a terminal: under Docker, escape codes would land in
+    // the log files.
     tracing_subscriber::fmt()
         .with_env_filter(lz_relay::log_filter("info"))
+        .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stdout()))
         .init();
     let args: Vec<String> = std::env::args().skip(1).collect();
     let [path] = args.as_slice() else {

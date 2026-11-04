@@ -1,0 +1,18 @@
+# Caddy in front of lz-relay (relay/README.md): TLS, then everything to
+# the relay. Caddy gets and renews the certificate for LZ_RELAY_DOMAIN on
+# its own.
+{
+	# Caddy writes no access log unless a site asks for one; this file
+	# never does. Its error log names each failed request's client address
+	# and path (which holds the gateway origin), so leave it out too.
+	log default {
+		exclude http.log.error
+	}
+}
+
+{$LZ_RELAY_DOMAIN} {
+	reverse_proxy relay:8080 {
+		# Pass the relay's answer on as it arrives.
+		flush_interval -1
+	}
+}
