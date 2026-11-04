@@ -24,8 +24,11 @@ use lz_server::{AppState, chain, gateway, mempool, push, scanner};
 
 #[tokio::main]
 async fn main() -> ExitCode {
+    // Colors only on a terminal: under Docker, escape codes would land in
+    // the log files.
     tracing_subscriber::fmt()
         .with_env_filter(lz_server::log_filter("info"))
+        .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stdout()))
         .init();
 
     let args: Vec<String> = std::env::args().skip(1).collect();
