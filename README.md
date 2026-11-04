@@ -68,8 +68,11 @@ service.
   accepts it. Without that, the wallet still gets live updates while it is
   open.
 
-No public relay carries Lantern Zero traffic yet: the change that lets the
-Payjoin project's relay forward it is under review
+Public relays are few so far. [`spec/relays.md`](spec/relays.md) lists
+one, ours, which carries traffic only to servers we don't run, such as
+self-hosted ones. More operators are needed: [`relay/`](relay/README.md) is
+a relay anyone can run, and the change that lets the Payjoin project's
+relay forward Lantern Zero traffic is under review
 ([payjoin/rust-payjoin#2026](https://github.com/payjoin/rust-payjoin/pull/2026)).
 Self-hosted servers on Tor don't need one.
 

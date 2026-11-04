@@ -187,8 +187,9 @@ certificates and may hit Let's Encrypt's rate limits.
 ## Getting listed
 
 Open a pull request adding your relay to
-[`spec/relays.md`](../spec/relays.md), with your public contact and your
-log retention. Wallet vendors build their relay lists from it, and pick
+[`spec/relays.md`](../spec/relays.md), with your public contact, your
+log retention, and any servers you refuse. If you also run Lantern Zero
+servers, your relay must deny all of them (spec §1.1). Wallet vendors build their relay lists from it, and pick
 relays by different operators so no single one sees all of a wallet's
 traffic.
 

@@ -6,13 +6,13 @@ describes, with tests against a fake gateway and end to end with
 and published by the Images workflow since v0.1.2), the Compose example
 with Caddy (`deploy/`, tested in CI by `deploy/smoke-test.sh`), and the
 operator README. Running at `relay.lanternzero.com` since 2026-11-04.
-Not yet: a listing in `spec/relays.md`. Tracking issue:
+Listed in `spec/relays.md` since 2026-11-04. Tracking issue:
 [#9](https://github.com/principlezerolabs/lanternzero/issues/9).
 
 `lz-relay` is a small OHTTP relay (RFC 9458) for Lantern Zero gateways.
 It's meant to be run by third parties, such as community organizations:
 anyone who runs neither a Lantern Zero server nor the wallet that lists
-the relay (spec §1.1). It does one job: forward encapsulated requests to
+the relay, or who refuses every server it runs (spec §1.1). It does one job: forward encapsulated requests to
 gateways that declare the Lantern Zero purpose, and see as little as
 possible while doing it.
 

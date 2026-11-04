@@ -5,7 +5,7 @@ bridge until Zcash's Tachyon upgrade changes how wallets find payments. Read
 `README.md` first for the user-facing description.
 
 **Status (2026-11-01): pre-alpha, phase 1 of 4: spec and prototype.** The
-draft protocol spec is `spec/v0.md` (rev 3.19); `crates/lz-proto` holds the
+draft protocol spec is `spec/v0.md` (rev 3.20); `crates/lz-proto` holds the
 shared protocol types; `server/` is a prototype (OHTTP gateway, devices,
 30-minute pings, chain follower, and the scanner with in-memory leases,
 events, hints, and long-poll); `gateway/`, `client/core`, and the
@@ -93,7 +93,8 @@ same copy. Treat a violation as a bug, and test for it.
   `payjoin/ohttp-relay` was archived in Dec 2025. It forwards only to
   gateways declaring the BIP77 purpose, so it needs a configurable-purpose
   change before it can carry Lantern Zero traffic (spec §9). That change is
-  proposed upstream in payjoin/rust-payjoin#2026.
+  proposed upstream in payjoin/rust-payjoin#2026. Until then, our own
+  `lz-relay` (`relay/`) carries it; `spec/relays.md` lists relays.
 - **Decided (2026-10-31):**
   - **Workspace:** one Cargo workspace (`crates/lz-proto`, `server`,
     `gateway`, `relay`, `client/core`, `client/uniffi`). Client-side crates
