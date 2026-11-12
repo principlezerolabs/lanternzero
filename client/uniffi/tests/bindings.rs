@@ -208,10 +208,14 @@ fn leases_are_checked_before_sending() {
         spend_alerts: false,
         alert_mode: AlertMode::Private,
     };
-    assert!(matches!(
-        c.wake(NOW, Some(full)),
-        Err(LzError::Lease { .. })
-    ));
+    let err = c.wake(NOW, Some(full)).unwrap_err();
+    let LzError::Lease { reason } = &err else {
+        panic!("expected a lease error, got {err:?}");
+    };
+    // `reason`, not `message`: that name clashes with Kotlin's
+    // `Throwable.message` (issue #14).
+    assert!(!reason.is_empty());
+    assert_eq!(err.to_string(), format!("invalid lease: {reason}"));
 }
 
 #[test]

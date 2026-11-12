@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
-# Generates the Swift and Kotlin bindings and compiles both, so a change
-# to the exported API that breaks one language fails here, not in an app
-# (issue #14: a field named `message` clashed with `Throwable.message`).
+# Generates the Swift and Kotlin bindings, compiles the Kotlin, and
+# typechecks the Swift, so a change to the exported API that breaks one
+# language fails here, not in an app (issue #14: a field named `message`
+# clashed with `Throwable.message`).
 #
 # Needs: cargo, a JDK (java on PATH or JAVA_HOME), curl, unzip. Swift is
 # checked when `swiftc` is on PATH (Xcode on macOS, preinstalled on
-# GitHub's Ubuntu runners). The Kotlin compiler and JNA are downloaded at
-# pinned versions and checked against their published SHA-256 sums.
+# GitHub's Ubuntu runners); in CI (`CI` set) a missing `swiftc` is an
+# error. The Kotlin compiler and JNA are downloaded at pinned versions and
+# checked against their published SHA-256 sums before anything runs.
 #
 # Usage: client/uniffi/check-bindings.sh [work-dir]
 set -euo pipefail
@@ -29,7 +31,7 @@ sha256() {
 # fetch URL FILE SHA256: download once, verify every time.
 fetch() {
   if [[ ! -f "$work/$2" ]]; then
-    curl -fsSL --retry 3 -o "$work/$2.part" "$1"
+    curl -fsSL --proto '=https' --tlsv1.2 --retry 3 -o "$work/$2.part" "$1"
     mv "$work/$2.part" "$work/$2"
   fi
   local got
@@ -77,6 +79,9 @@ if command -v swiftc >/dev/null; then
     -Xcc -fmodule-map-file="$out/lz_client_uniffiFFI.modulemap" \
     "$out/lz_client_uniffi.swift"
   echo "check-bindings: Swift typechecks"
+elif [[ -n "${CI:-}" ]]; then
+  echo "check-bindings: no swiftc on PATH" >&2
+  exit 1
 else
   echo "check-bindings: no swiftc on PATH; Swift not checked" >&2
 fi

@@ -150,6 +150,13 @@ Optional binaries for a full local match to CI lint:
 [`cargo-machete`](https://github.com/bnjbvr/cargo-machete),
 [`typos`](https://github.com/crate-ci/typos) (`cargo install typos-cli --locked`).
 
+If you change what `client/uniffi` exports, also check that the
+generated Swift and Kotlin still compile (needs a JDK; CI runs it too):
+
+```sh
+client/uniffi/check-bindings.sh
+```
+
 If you change the chain follower, scanner, or mempool code, also run the
 regtest tests against real Zebra and Zaino (needs Docker; CI runs them too).
 This starts a chain of its own, so it won't disturb one already running
