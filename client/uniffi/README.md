@@ -6,10 +6,10 @@ that have no Rust library of their own: native apps, and React Native or
 other cross-platform apps through a native module over these.
 
 **Status: prototype.** Tested in Rust against a stand-in OHTTP gateway
-(`tests/bindings.rs`), and the generated Swift compiles and runs against
-the static library on macOS. The Kotlin is generated but not yet compiled.
-Not yet built for iOS or Android targets in CI, and not yet used in an
-app.
+(`tests/bindings.rs`). CI generates the Swift and Kotlin and compiles
+both (`check-bindings.sh`: Kotlin against JNA, Swift against the
+generated header), and the Swift runs against the static library on
+macOS. Not yet built for iOS or Android targets in CI.
 
 **Wallet SDKs don't need this.** If the app already ships a Rust library
 (as ZODL's SDKs do), compile `lz-client` into it and expose it through
@@ -76,6 +76,19 @@ its own crate that depends on this one and on those, builds one library
 from it, and runs `generate --library` on that library: UniFFI's library
 mode generates bindings for every crate in it. The app still links one
 Rust library.
+
+On Android, `cargo-ndk` copies every shared library the build produced
+into `jniLibs`. This crate is also a `cdylib` (for apps that use it on
+its own), so next to the app's library you get a
+`liblz_client_uniffi-<hash>.so`. Nothing loads it, since the app's
+library already contains the crate, so delete it from `jniLibs` after
+the build rather than shipping a second Rust library.
+
+To check that the bindings still compile after changing the exported
+API, run `client/uniffi/check-bindings.sh` (needs a JDK; downloads a
+pinned Kotlin compiler and JNA). Some names break only one language: a
+field named `message` or `cause` clashes with Kotlin's `Throwable`
+(issue #14).
 
 ## Versioning
 
