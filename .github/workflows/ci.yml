@@ -49,6 +49,19 @@ jobs:
       - if: matrix.toolchain == '1.89'
         run: cargo +1.89 test --workspace --locked
 
+  # The generated Swift and Kotlin bindings compile (client/uniffi).
+  uniffi-bindings:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # The pinned toolchain (rust-toolchain.toml), which the script's cargo uses.
+      - run: rustup toolchain install
+      - run: client/uniffi/check-bindings.sh
+        env:
+          CARGO_FLAGS: --locked
+
   # Integration tests against real Zebra and Zaino on a private regtest
   # chain (deploy/regtest).
   regtest:

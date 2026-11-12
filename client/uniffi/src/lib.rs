@@ -87,12 +87,12 @@ pub enum LzError {
     KeyConfigInconsistent,
     #[error("Tor transport needs a .onion server")]
     OnionOnly,
-    /// The lease breaks a rule of spec §4.2 (`message` says which).
-    #[error("invalid lease: {message}")]
-    Lease { message: String },
+    /// The lease breaks a rule of spec §4.2 (`reason` says which).
+    #[error("invalid lease: {reason}")]
+    Lease { reason: String },
     /// The device registration breaks a rule of spec §4.1.
-    #[error("invalid registration: {message}")]
-    Registration { message: String },
+    #[error("invalid registration: {reason}")]
+    Registration { reason: String },
     #[error("server error {status} ({problem})")]
     Server { status: u16, problem: String },
 
@@ -152,10 +152,10 @@ impl From<lz_client::Error> for LzError {
             E::KeyConfigInconsistent => Self::KeyConfigInconsistent,
             E::OnionOnly => Self::OnionOnly,
             E::Lease(l) => Self::Lease {
-                message: l.to_string(),
+                reason: l.to_string(),
             },
             E::Registration(r) => Self::Registration {
-                message: r.to_string(),
+                reason: r.to_string(),
             },
             E::Server { status, problem } => Self::Server { status, problem },
         }
