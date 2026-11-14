@@ -1,8 +1,10 @@
-# Publishes the self-hosting kit's images (deploy/DESIGN.md, "Releases")
-# and the relay's (relay/README.md):
+# Publishes the self-hosting kit's images (deploy/DESIGN.md, "Releases"),
+# the relay's (relay/README.md) and the reference push gateway's
+# (gateway/README.md):
 #   ghcr.io/principlezerolabs/lantern-zero-server
 #   ghcr.io/principlezerolabs/lantern-zero-tor
 #   ghcr.io/principlezerolabs/lantern-zero-relay
+#   ghcr.io/principlezerolabs/lantern-zero-gateway
 # for linux/amd64 and linux/arm64, each built on a native runner, with an
 # SBOM and provenance attached, and signed with cosign keyless (Sigstore,
 # through this workflow's GitHub identity). Runs on version tags (v*) and
@@ -31,7 +33,7 @@ jobs:
     strategy:
       fail-fast: true
       matrix:
-        image: [server, tor, relay]
+        image: [server, tor, relay, gateway]
         arch: [amd64, arm64]
         include:
           - arch: amd64
@@ -47,6 +49,9 @@ jobs:
           - image: relay
             context: .
             file: relay/Dockerfile
+          - image: gateway
+            context: .
+            file: gateway/Dockerfile
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -97,7 +102,7 @@ jobs:
       id-token: write
     strategy:
       matrix:
-        image: [server, tor, relay]
+        image: [server, tor, relay, gateway]
     env:
       IMAGE: ghcr.io/principlezerolabs/lantern-zero-${{ matrix.image }}
     steps:

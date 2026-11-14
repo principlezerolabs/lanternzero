@@ -113,6 +113,16 @@ jobs:
           persist-credentials: false
       - run: bash relay/deploy/smoke-test.sh
 
+  # The push gateway's image: builds, starts read-only as its own user,
+  # keeps its keys private, answers (gateway/smoke-test.sh).
+  gateway-image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: bash gateway/smoke-test.sh
+
   # Advisories, licenses, banned crates and features (including ohttp's
   # nss and unsafe-print-secrets), and sources. Policy: deny.toml.
   cargo-deny:

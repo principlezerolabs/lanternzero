@@ -8,5 +8,6 @@ deploy/
 **/.env.*
 **/*.pem
 **/*.key
+**/*.p8
 **/lz-data/
 **/lz-gateway-data/

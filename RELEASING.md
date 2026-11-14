@@ -1,9 +1,10 @@
 # Releasing
 
 A release is a version tag on `main`. The tag publishes the self-hosting
-kit's signed images and the relay's (`.github/workflows/images.yml`);
-the Compose files then pin their digests. The Rust crates aren't
-published (`publish = false`).
+kit's signed images, the relay's and the reference push gateway's
+(`.github/workflows/images.yml`); the Compose files then pin their
+digests. The gateway has no Compose file: vendors pin it themselves. The
+Rust crates aren't published (`publish = false`).
 
 Updates are opt-in for self-hosters, because the server holds viewing keys
 for anyone who turns on scanning (`deploy/DESIGN.md`, "Releases"). So
@@ -69,13 +70,15 @@ docker buildx imagetools inspect ghcr.io/principlezerolabs/lantern-zero-server@s
 ```
 
 `imagetools inspect` should list `linux/amd64` and `linux/arm64`. Do the
-same for `lantern-zero-tor` and `lantern-zero-relay`. Then add the full
+same for `lantern-zero-tor`, `lantern-zero-relay` and
+`lantern-zero-gateway`. Then add the full
 `…@sha256:` references, and the verify command, to the release notes'
 "Images" section.
 
 The packages must be public for self-hosters to pull them (the
 organization's package settings on GitHub; once per package, so once
-more for `lantern-zero-relay` after the first release that has it).
+more for `lantern-zero-gateway` after v0.1.3, the first release that
+has it).
 
 ## 5. Pin the images, then publish the notes
 
