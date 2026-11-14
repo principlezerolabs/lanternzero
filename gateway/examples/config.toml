@@ -26,6 +26,10 @@ sandbox = false
 # Also accept "apns-sandbox" subscriptions from development (Xcode) builds,
 # sent to Apple's development environment with the same key.
 allow_sandbox = false
+# Optional: a separate key for "apns-sandbox", for Apple keys limited to
+# this app (Apple then allows one environment per key).
+# sandbox_key_id = "KEY7654321"
+# sandbox_key_path = "/etc/lz-gateway/AuthKey_KEY7654321.p8"
 
 [fcm]
 project_id = "example-wallet"

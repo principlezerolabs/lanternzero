@@ -124,6 +124,8 @@ async fn harness_custom(tweak: impl FnOnce(&mut Config)) -> Harness {
             topic: "app.example.wallet".into(),
             sandbox: false,
             allow_sandbox: true,
+            sandbox_key_id: None,
+            sandbox_key_path: None,
             base_url: Some(apns_url),
             sandbox_base_url: Some(apns_sandbox_url),
         }),
@@ -577,6 +579,91 @@ async fn sandbox_subscriptions_go_to_the_development_environment() {
             .unwrap()
             .starts_with("bearer ")
     );
+}
+
+/// The `kid` of the APNs provider token a fake platform received, after
+/// checking its signature with `key`.
+fn apns_kid(headers: &HeaderMap, key: &p256::PublicKey) -> String {
+    use p256::ecdsa::signature::Verifier;
+    let bearer = headers["authorization"]
+        .to_str()
+        .unwrap()
+        .strip_prefix("bearer ")
+        .unwrap();
+    let parts: Vec<&str> = bearer.split('.').collect();
+    let sig =
+        p256::ecdsa::Signature::from_slice(&URL_SAFE_NO_PAD.decode(parts[2]).unwrap()).unwrap();
+    p256::ecdsa::VerifyingKey::from(*key)
+        .verify(format!("{}.{}", parts[0], parts[1]).as_bytes(), &sig)
+        .unwrap();
+    let header: Value = serde_json::from_slice(&URL_SAFE_NO_PAD.decode(parts[0]).unwrap()).unwrap();
+    header["kid"].as_str().unwrap().to_owned()
+}
+
+#[tokio::test]
+async fn a_separate_sandbox_key_signs_sandbox_pushes() {
+    // Apple limits a key to one app only if it covers one environment, so a
+    // vendor may hold a production key and a sandbox key.
+    let dir = temp_dir("sandbox-key");
+    let sandbox_key = p256::SecretKey::from_slice(&[0x55; 32]).unwrap();
+    let path = dir.join("AuthKey_SANDBOX.p8");
+    std::fs::write(
+        &path,
+        sandbox_key
+            .to_pkcs8_pem(Default::default())
+            .unwrap()
+            .as_bytes(),
+    )
+    .unwrap();
+    let h = harness_custom(|c| {
+        let a = c.apns.as_mut().unwrap();
+        a.sandbox_key_id = Some("SANDBOX123".into());
+        a.sandbox_key_path = Some(path);
+    })
+    .await;
+    let release = h.endpoint("apns", APNS_TOKEN).await;
+    let dev = h.endpoint("apns-sandbox", APNS_TOKEN).await;
+    for e in [&release, &dev] {
+        assert_eq!(h.push(&h.server, e, "normal", &[1; 10]).await.status(), 201);
+    }
+    let (prod_seen, dev_seen) = (h.apns.take(), h.apns_sandbox.take());
+    assert_eq!(apns_kid(&prod_seen[0].1, &h.apns_public), "KEY1234567");
+    assert_eq!(
+        apns_kid(&dev_seen[0].1, &sandbox_key.public_key()),
+        "SANDBOX123"
+    );
+}
+
+#[test]
+fn a_sandbox_key_needs_its_id_path_and_allow_sandbox() {
+    let mut a = lz_gateway::config::ApnsConfig {
+        team_id: "TEAM123456".into(),
+        key_id: "KEY1234567".into(),
+        key_path: "/k.p8".into(),
+        topic: "app.example.wallet".into(),
+        sandbox: false,
+        allow_sandbox: false,
+        sandbox_key_id: Some("SANDBOX123".into()),
+        sandbox_key_path: Some("/s.p8".into()),
+        base_url: None,
+        sandbox_base_url: None,
+    };
+    let config = |a: &lz_gateway::config::ApnsConfig| Config {
+        listen: "127.0.0.1:0".parse().unwrap(),
+        trusted_proxies: Vec::new(),
+        public_origin: "https://push.example.test".into(),
+        data_dir: "/tmp/x".into(),
+        endpoint_lifetime_days: 90,
+        alert_title: "New activity".into(),
+        apns: Some(a.clone()),
+        fcm: None,
+        limits: LimitsConfig::default(),
+    };
+    assert!(config(&a).validate().is_err(), "needs allow_sandbox");
+    a.allow_sandbox = true;
+    assert!(config(&a).validate().is_ok());
+    a.sandbox_key_path = None;
+    assert!(config(&a).validate().is_err(), "id without a path");
 }
 
 #[tokio::test]
