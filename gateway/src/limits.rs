@@ -1,12 +1,21 @@
-//! Per-device and per-server-key rate limits (spec §5.3).
+//! Per-device and per-server-key rate limits (spec §5.3), and per-address
+//! limits on the wallet API.
 //!
 //! Binding stops other servers from pushing to a device, but not the
 //! device's own server from pushing too often. Background wakes and
 //! visible payment alerts get separate hourly budgets per device; a server
 //! key also has an overall per-minute budget.
+//!
+//! The wallet API is open, so subscribing and revoking are also limited
+//! per client address ([`ClientKey`]), mainly so nobody can cheaply fill
+//! the revocation list. Those tables hold only salted hashes of addresses,
+//! in memory: a restart forgets them, and nothing logs them.
 
 use std::collections::HashMap;
+use std::net::IpAddr;
 use std::sync::Mutex;
+
+use sha2::{Digest, Sha256};
 
 /// A fixed-window counter: at most `limit` hits per `window_secs` per key.
 #[derive(Debug)]
@@ -62,6 +71,52 @@ pub struct Limits {
     pub background: Window,
     pub alert: Window,
     pub per_server: Window,
+    /// Per client address, per hour.
+    pub subscribe: Window,
+    pub revoke: Window,
+}
+
+/// Hashes client addresses for the per-address windows: an IPv4 address,
+/// or an IPv6 /64, since one host usually holds a whole /64 (as the relay
+/// counts, relay/src/limits.rs). Salted per process, so the tables don't
+/// hold addresses, and a hash from one run means nothing in the next.
+pub struct ClientKey {
+    salt: [u8; 32],
+}
+
+impl std::fmt::Debug for ClientKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ClientKey(<redacted>)")
+    }
+}
+
+impl Default for ClientKey {
+    fn default() -> Self {
+        let mut salt = [0u8; 32];
+        rand::fill(&mut salt);
+        Self { salt }
+    }
+}
+
+impl ClientKey {
+    pub fn of(&self, ip: IpAddr) -> [u8; 32] {
+        let ip = match ip {
+            IpAddr::V6(v6) => v6.to_ipv4_mapped().map(IpAddr::V4).unwrap_or(ip),
+            v4 => v4,
+        };
+        let bytes = match ip {
+            IpAddr::V4(v4) => v4.to_ipv6_mapped().octets(),
+            IpAddr::V6(v6) => {
+                let mut b = [0u8; 16];
+                b[..8].copy_from_slice(&v6.octets()[..8]);
+                b
+            }
+        };
+        let mut h = Sha256::new();
+        h.update(self.salt);
+        h.update(bytes);
+        h.finalize().into()
+    }
 }
 
 #[cfg(test)]
@@ -77,6 +132,22 @@ mod tests {
         assert_eq!(w.hit([1; 32], t + 600), Err(3000));
         assert_eq!(w.hit([2; 32], t), Ok(()));
         assert_eq!(w.hit([1; 32], t + 3600), Ok(()));
+    }
+
+    #[test]
+    fn client_keys_count_ipv6_per_64_and_mapped_ipv4_as_ipv4() {
+        let k = ClientKey::default();
+        let of = |s: &str| k.of(s.parse().unwrap());
+        assert_eq!(of("2001:db8:1:2::1"), of("2001:db8:1:2:ffff::9"));
+        assert_ne!(of("2001:db8:1:2::1"), of("2001:db8:1:3::1"));
+        assert_eq!(of("::ffff:192.0.2.1"), of("192.0.2.1"));
+        assert_ne!(of("192.0.2.1"), of("192.0.2.2"));
+        // Salted: another run hashes the same address differently.
+        assert_ne!(
+            ClientKey::default().of("192.0.2.1".parse().unwrap()),
+            of("192.0.2.1")
+        );
+        assert_eq!(format!("{k:?}"), "ClientKey(<redacted>)");
     }
 
     #[test]

@@ -1,6 +1,6 @@
 //! Gateway configuration, read from a TOML file.
 
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
 
 use serde::Deserialize;
@@ -10,6 +10,11 @@ use serde::Deserialize;
 pub struct Config {
     /// Address to listen on. TLS is terminated in front of the gateway.
     pub listen: SocketAddr,
+    /// Proxies in front of the gateway whose `X-Forwarded-For` names the
+    /// client. Used for the per-address limits on the wallet API only, and
+    /// never logged.
+    #[serde(default)]
+    pub trusted_proxies: Vec<IpAddr>,
     /// This gateway's public origin, for example `https://push.example.app`.
     /// Endpoints are built on it, and VAPID tokens must name it as `aud`.
     pub public_origin: String,
@@ -49,12 +54,21 @@ pub struct ApnsConfig {
     pub key_path: PathBuf,
     /// The app's bundle id (`apns-topic`).
     pub topic: String,
-    /// Use the development APNs environment.
+    /// Send `apns` subscriptions to the development APNs environment.
     #[serde(default)]
     pub sandbox: bool,
+    /// Also accept `apns-sandbox` subscriptions, from development builds
+    /// (Xcode), and send them to the development environment, so one
+    /// gateway serves both kinds of build. The same auth key works in
+    /// both. Leave it off for a gateway that only release builds use.
+    #[serde(default)]
+    pub allow_sandbox: bool,
     /// Overrides the APNs host, for tests.
     #[serde(default)]
     pub base_url: Option<String>,
+    /// Overrides the development APNs host for `apns-sandbox`, for tests.
+    #[serde(default)]
+    pub sandbox_base_url: Option<String>,
 }
 
 impl ApnsConfig {
@@ -64,6 +78,14 @@ impl ApnsConfig {
             (None, true) => "https://api.sandbox.push.apple.com".into(),
             (None, false) => "https://api.push.apple.com".into(),
         }
+    }
+
+    /// Where `apns-sandbox` subscriptions go, when allowed.
+    pub fn sandbox_url(&self) -> Option<String> {
+        self.allow_sandbox.then(|| match &self.sandbox_base_url {
+            Some(u) => u.trim_end_matches('/').to_owned(),
+            None => "https://api.sandbox.push.apple.com".into(),
+        })
     }
 }
 
@@ -100,6 +122,16 @@ pub struct LimitsConfig {
     /// All pushes signed by one server key, per minute.
     #[serde(default = "default_per_server")]
     pub per_server_per_minute: u32,
+    /// Subscriptions created per client address (an IPv4 address or an
+    /// IPv6 /64) per hour. A wallet subscribes once per server and renews
+    /// every few months, but carrier NAT puts many phones on one IPv4
+    /// address.
+    #[serde(default = "default_per_address")]
+    pub subscriptions_per_address_per_hour: u32,
+    /// Revocations per client address per hour. They fill the revocation
+    /// list, which holds at most 1,000,000.
+    #[serde(default = "default_per_address")]
+    pub revocations_per_address_per_hour: u32,
 }
 
 fn default_background() -> u32 {
@@ -111,6 +143,9 @@ fn default_alert() -> u32 {
 fn default_per_server() -> u32 {
     100_000
 }
+fn default_per_address() -> u32 {
+    60
+}
 
 impl Default for LimitsConfig {
     fn default() -> Self {
@@ -118,6 +153,8 @@ impl Default for LimitsConfig {
             background_per_hour: default_background(),
             alerts_per_hour: default_alert(),
             per_server_per_minute: default_per_server(),
+            subscriptions_per_address_per_hour: default_per_address(),
+            revocations_per_address_per_hour: default_per_address(),
         }
     }
 }
@@ -134,6 +171,8 @@ pub enum ConfigError {
     NoPlatform,
     #[error("endpoint_lifetime_days must be 1 to 365")]
     Lifetime,
+    #[error("[limits] per-address limits must be at least 1")]
+    Limits,
 }
 
 impl Config {
@@ -162,6 +201,11 @@ impl Config {
         }
         if !(1..=crate::keys::MAX_LIFETIME_DAYS).contains(&self.endpoint_lifetime_days) {
             return Err(ConfigError::Lifetime);
+        }
+        if self.limits.subscriptions_per_address_per_hour == 0
+            || self.limits.revocations_per_address_per_hour == 0
+        {
+            return Err(ConfigError::Limits);
         }
         Ok(())
     }

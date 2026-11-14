@@ -37,6 +37,8 @@ const MAX_OPAQUE: usize = 1024;
 pub enum Platform {
     Apns,
     Fcm,
+    /// APNs, development environment (`[apns] allow_sandbox`).
+    ApnsSandbox,
 }
 
 impl Platform {
@@ -44,6 +46,7 @@ impl Platform {
         match self {
             Platform::Apns => 1,
             Platform::Fcm => 2,
+            Platform::ApnsSandbox => 3,
         }
     }
 
@@ -51,6 +54,7 @@ impl Platform {
         match c {
             1 => Some(Platform::Apns),
             2 => Some(Platform::Fcm),
+            3 => Some(Platform::ApnsSandbox),
             _ => None,
         }
     }

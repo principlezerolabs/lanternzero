@@ -9,7 +9,7 @@ use axum::http::{HeaderMap, StatusCode};
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use lz_gateway::config::{ApnsConfig, Config, FcmConfig, LimitsConfig};
-use lz_gateway::{AppState, router};
+use lz_gateway::{AppState, app};
 use lz_server::webpush::Vapid;
 use p256::pkcs8::EncodePrivateKey;
 use serde_json::{Value, json};
@@ -66,6 +66,8 @@ impl Platform {
 struct Harness {
     origin: String,
     apns: Platform,
+    /// Apple's development environment, for `apns-sandbox`.
+    apns_sandbox: Platform,
     fcm: Platform,
     apns_public: p256::PublicKey,
     server: Vapid,
@@ -85,7 +87,13 @@ fn temp_dir(tag: &str) -> std::path::PathBuf {
 }
 
 async fn harness_with(limits: LimitsConfig) -> Harness {
+    harness_custom(|c| c.limits = limits).await
+}
+
+/// A gateway with `tweak` applied to the test config.
+async fn harness_custom(tweak: impl FnOnce(&mut Config)) -> Harness {
     let (apns_url, apns) = Platform::start().await;
+    let (apns_sandbox_url, apns_sandbox) = Platform::start().await;
     let (fcm_url, fcm) = Platform::start().await;
     let dir = temp_dir("gw");
     // A throwaway APNs auth key, as Apple's `.p8` file would hold it.
@@ -102,8 +110,9 @@ async fn harness_with(limits: LimitsConfig) -> Harness {
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let origin = format!("http://{}", listener.local_addr().unwrap());
-    let config = Config {
+    let mut config = Config {
         listen: listener.local_addr().unwrap(),
+        trusted_proxies: Vec::new(),
         public_origin: origin.clone(),
         data_dir: dir.join("data"),
         endpoint_lifetime_days: 90,
@@ -114,7 +123,9 @@ async fn harness_with(limits: LimitsConfig) -> Harness {
             key_path,
             topic: "app.example.wallet".into(),
             sandbox: false,
+            allow_sandbox: true,
             base_url: Some(apns_url),
+            sandbox_base_url: Some(apns_sandbox_url),
         }),
         fcm: Some(FcmConfig {
             project_id: "example-wallet".into(),
@@ -122,15 +133,17 @@ async fn harness_with(limits: LimitsConfig) -> Harness {
             static_access_token: Some("test-access-token".into()),
             base_url: fcm_url,
         }),
-        limits,
+        limits: LimitsConfig::default(),
     };
+    tweak(&mut config);
     config.validate().unwrap();
     let data_dir = config.data_dir.clone();
     let state = AppState::new(config.clone()).unwrap();
-    let task = tokio::spawn(async move { axum::serve(listener, router(state)).await.unwrap() });
+    let task = tokio::spawn(async move { axum::serve(listener, app(state)).await.unwrap() });
     Harness {
         origin,
         apns,
+        apns_sandbox,
         fcm,
         apns_public: apns_key.public_key(),
         server: Vapid::from_secret(&[0x22; 32]).unwrap(),
@@ -169,8 +182,7 @@ impl Harness {
         let listener = tokio::net::TcpListener::bind(self.config.listen)
             .await
             .unwrap();
-        self.task =
-            tokio::spawn(async move { axum::serve(listener, router(state)).await.unwrap() });
+        self.task = tokio::spawn(async move { axum::serve(listener, app(state)).await.unwrap() });
         // Pooled connections would still reach the old instance's tasks.
         self.http = reqwest::Client::new();
     }
@@ -484,6 +496,7 @@ async fn rate_limits_per_device_with_separate_alert_budget() {
         background_per_hour: 3,
         alerts_per_hour: 2,
         per_server_per_minute: 1000,
+        ..LimitsConfig::default()
     })
     .await;
     let endpoint = h.endpoint("apns", APNS_TOKEN).await;
@@ -543,6 +556,120 @@ async fn rate_limits_per_device_with_separate_alert_budget() {
         201
     );
     assert_eq!(h.apns.take().len(), 6);
+}
+
+#[tokio::test]
+async fn sandbox_subscriptions_go_to_the_development_environment() {
+    let h = harness().await;
+    let release = h.endpoint("apns", APNS_TOKEN).await;
+    let dev = h.endpoint("apns-sandbox", APNS_TOKEN).await;
+    for e in [&release, &dev] {
+        assert_eq!(h.push(&h.server, e, "normal", &[1; 10]).await.status(), 201);
+    }
+    let (prod_seen, dev_seen) = (h.apns.take(), h.apns_sandbox.take());
+    assert_eq!((prod_seen.len(), dev_seen.len()), (1, 1));
+    assert_eq!(dev_seen[0].0, format!("/3/device/{APNS_TOKEN}"));
+    // The same auth key and topic in both environments.
+    assert_eq!(dev_seen[0].1["apns-topic"], "app.example.wallet");
+    assert!(
+        dev_seen[0].1["authorization"]
+            .to_str()
+            .unwrap()
+            .starts_with("bearer ")
+    );
+}
+
+#[tokio::test]
+async fn sandbox_subscriptions_need_allow_sandbox() {
+    let mut h = harness().await;
+    let dev = h.endpoint("apns-sandbox", APNS_TOKEN).await;
+    h.config.apns.as_mut().unwrap().allow_sandbox = false;
+    h.restart().await;
+    let r = h
+        .subscribe("apns-sandbox", APNS_TOKEN, &h.server.public_b64)
+        .await;
+    assert_eq!(r.status(), 400);
+    // An endpoint made while it was allowed can't work any more: the
+    // server drops the device.
+    assert_eq!(
+        h.push(&h.server, &dev, "normal", &[1; 10]).await.status(),
+        410
+    );
+    assert!(h.apns_sandbox.take().is_empty());
+}
+
+#[tokio::test]
+async fn limits_subscribing_and_revoking_per_address() {
+    let h = harness_with(LimitsConfig {
+        subscriptions_per_address_per_hour: 2,
+        revocations_per_address_per_hour: 1,
+        ..LimitsConfig::default()
+    })
+    .await;
+    let a = h.subscription("apns", APNS_TOKEN).await;
+    let f = h.subscription("fcm", FCM_TOKEN).await;
+    let r = h.subscribe("apns", APNS_TOKEN, &h.server.public_b64).await;
+    assert_eq!(r.status(), 429);
+    assert!(
+        r.headers()["retry-after"]
+            .to_str()
+            .unwrap()
+            .parse::<u64>()
+            .unwrap()
+            <= 3600
+    );
+    // The peer isn't a trusted proxy, so a forged X-Forwarded-For changes
+    // nothing.
+    let r = h
+        .http
+        .post(format!("{}/v0/subscriptions", h.origin))
+        .header("x-forwarded-for", "192.0.2.9")
+        .body(
+            json!({ "platform": "apns", "token": APNS_TOKEN, "server_key": h.server.public_b64 })
+                .to_string(),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 429);
+
+    let endpoint = a["endpoint"].as_str().unwrap();
+    let secret = a["revoke_secret"].as_str().unwrap();
+    assert_eq!(h.revoke(endpoint, Some(secret)).await, 204);
+    assert_eq!(h.revoke(endpoint, Some(secret)).await, 429);
+    // Pushes aren't counted per address: servers push from one address.
+    let fcm_endpoint = f["endpoint"].as_str().unwrap();
+    for _ in 0..3 {
+        assert_eq!(
+            h.push(&h.server, fcm_endpoint, "high", &[1; 10])
+                .await
+                .status(),
+            201
+        );
+    }
+}
+
+#[tokio::test]
+async fn trusted_proxies_name_the_client() {
+    let h = harness_custom(|c| {
+        c.trusted_proxies = vec!["127.0.0.1".parse().unwrap()];
+        c.limits.subscriptions_per_address_per_hour = 1;
+    })
+    .await;
+    let from = |ip: &'static str| {
+        h.http
+            .post(format!("{}/v0/subscriptions", h.origin))
+            .header("x-forwarded-for", format!("203.0.113.50, {ip}"))
+            .body(json!({ "platform": "apns", "token": APNS_TOKEN, "server_key": h.server.public_b64 }).to_string())
+            .send()
+    };
+    assert_eq!(from("192.0.2.1").await.unwrap().status(), 201);
+    assert_eq!(from("192.0.2.1").await.unwrap().status(), 429);
+    // The last entry is the proxy's; earlier ones are the client's to forge.
+    assert_eq!(from("192.0.2.2").await.unwrap().status(), 201);
+    // IPv6 counts per /64.
+    assert_eq!(from("2001:db8:1:2::1").await.unwrap().status(), 201);
+    assert_eq!(from("2001:db8:1:2::99").await.unwrap().status(), 429);
 }
 
 #[tokio::test]
