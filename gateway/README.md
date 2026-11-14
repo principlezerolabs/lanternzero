@@ -37,7 +37,12 @@ the real server's wake round; not yet against Apple or Google.
   with `Retry-After`. Budgets are fixed hourly windows, so a server can
   briefly send up to twice its budget across a window boundary. A wallet
   with two servers gets two budgets; Apple may then throttle some wakes,
-  which wallets must tolerate anyway (spec §5.4).
+  which wallets must tolerate anyway (spec §5.4). The wallet API is also
+  limited per client address (an IPv4 address or an IPv6 /64): 60
+  subscriptions and 60 revocations an hour by default. The counters hold
+  salted hashes of addresses, in memory only, and are never logged.
+  Behind a proxy, list it in `trusted_proxies` so its `X-Forwarded-For`
+  names the client; from anyone else that header is ignored.
 - **Blind.** Only `aes128gcm` bodies are accepted, and they are forwarded
   unchanged, base64url in the `lz` field. Payment alerts show a fixed,
   generic title (`alert_title`); the app's Notification Service Extension
@@ -52,7 +57,7 @@ gateway. The reference one takes:
 
 ```
 POST /v0/subscriptions
-{ "platform": "apns" | "fcm",
+{ "platform": "apns" | "apns-sandbox" | "fcm",
   "token": "<APNs device token, hex | FCM registration token>",
   "server_key": "<vapid_public_key from the server's info, base64url>" }
 → 201 { "endpoint": "https://<public_origin>/wp/<opaque>",
@@ -65,6 +70,17 @@ Authorization: Bearer <revoke_secret>
   401 no secret · 403 wrong secret · 404 not this gateway's endpoint
   503 revocation list full, try later
 ```
+
+Both answer `429` with `Retry-After` past the per-address limits.
+
+`apns-sandbox` is for development builds (Xcode), whose device tokens
+work only in Apple's development environment. The gateway accepts it
+when `[apns] allow_sandbox = true`, and sends those pushes there with the
+same auth key; `apns` goes to the environment `sandbox` picks
+(production by default). So one gateway serves development, TestFlight
+and App Store builds. The app knows which it is from its
+`aps-environment` entitlement. Turning `allow_sandbox` off later makes
+existing `apns-sandbox` endpoints answer `410`.
 
 The wallet registers the endpoint with the server (`POST /v0/devices`) and
 keeps `revoke_secret` on the device; the server never sees it. A wallet
@@ -145,8 +161,10 @@ revocations.
 
 - **Abuse of the open wallet API.** Anyone can subscribe and then revoke,
   so the revocation list could be filled; past 1,000,000 entries,
-  revocations get `503` until old ones expire. Put a per-address rate limit
-  in front of the gateway. App attestation would close this properly.
+  revocations get `503` until old ones expire. The per-address limits
+  make that slow (at 60 an hour, about 17,000 address-hours), not
+  impossible for someone with many addresses. App attestation (App
+  Attest, Play Integrity) would close it properly.
 - **Several gateway instances.** Rate limits live in memory per instance,
   and the revocation list is a local file. Run one instance, or share the
   list.

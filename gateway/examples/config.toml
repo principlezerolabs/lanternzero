@@ -1,5 +1,8 @@
 # Example gateway configuration. TLS is terminated in front of the gateway.
 listen = "127.0.0.1:8090"
+# Proxies whose X-Forwarded-For names the client, for the per-address
+# limits. Only these; from anyone else the header is ignored.
+trusted_proxies = []
 # Endpoints are built on this origin, and servers' VAPID tokens must name it.
 public_origin = "https://push.example-wallet.app"
 # Holds the endpoint-sealing keys and the revocation list. Losing it
@@ -17,7 +20,12 @@ key_id = "KEY1234567"
 key_path = "/etc/lz-gateway/AuthKey_KEY1234567.p8"
 # The wallet app's bundle id.
 topic = "app.example.wallet"
+# Where "apns" subscriptions go: false for production (TestFlight, App
+# Store builds).
 sandbox = false
+# Also accept "apns-sandbox" subscriptions from development (Xcode) builds,
+# sent to Apple's development environment with the same key.
+allow_sandbox = false
 
 [fcm]
 project_id = "example-wallet"
@@ -29,3 +37,6 @@ credentials_path = "/etc/lz-gateway/fcm-service-account.json"
 background_per_hour = 3
 alerts_per_hour = 20
 per_server_per_minute = 100000
+# The open wallet API, per client address (IPv4 address or IPv6 /64).
+subscriptions_per_address_per_hour = 60
+revocations_per_address_per_hour = 60

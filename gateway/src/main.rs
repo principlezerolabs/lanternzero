@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use lz_gateway::config::Config;
-use lz_gateway::{AppState, router};
+use lz_gateway::{AppState, app};
 
 #[tokio::main]
 async fn main() -> ExitCode {
@@ -72,7 +72,7 @@ async fn main() -> ExitCode {
         }
     };
     tracing::info!(%listen, "serving");
-    match axum::serve(listener, router(state))
+    match axum::serve(listener, app(state))
         .with_graceful_shutdown(shutdown_signal())
         .await
     {
