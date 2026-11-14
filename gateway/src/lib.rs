@@ -11,13 +11,13 @@
 //! - **Bound.** Each subscription accepts pushes signed by one server key
 //!   ([`vapid`]); there is no admission list.
 //! - **Rate-limited** per device, with background and alert budgets apart,
-//!   and per server key ([`limits`]).
+//!   and per server key; the wallet API per client address ([`limits`]).
 //! - **Blind.** Payloads are forwarded as received: encrypted to the
 //!   device. Nothing logs device tokens, endpoints, or payloads.
 //!
 //! Wallet API (vendor-internal, not part of the Lantern Zero spec):
 //! - `POST /v0/subscriptions` with
-//!   `{"platform": "apns" | "fcm", "token": "...", "server_key": "<base64url>"}`
+//!   `{"platform": "apns" | "apns-sandbox" | "fcm", "token": "...", "server_key": "<base64url>"}`
 //!   returns `201 {"endpoint": "https://<origin>/wp/<opaque>",
 //!   "expires": <unix seconds>, "revoke_secret": "<base64url>"}`.
 //! - `DELETE /v0/subscriptions/<opaque>` with
@@ -31,12 +31,14 @@ pub mod revoke;
 pub mod seal;
 pub mod vapid;
 
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::Router;
 use axum::body::Bytes;
-use axum::extract::{DefaultBodyLimit, Path as UrlPath, State};
+use axum::extract::connect_info::IntoMakeServiceWithConnectInfo;
+use axum::extract::{ConnectInfo, DefaultBodyLimit, Path as UrlPath, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, post};
@@ -48,7 +50,7 @@ use subtle::ConstantTimeEq as _;
 use zeroize::Zeroizing;
 
 use crate::keys::KeyRing;
-use crate::limits::{Limits, Window};
+use crate::limits::{ClientKey, Limits, Window};
 use crate::platform::{Apns, Delivery, Fcm, Kind, Push};
 use crate::revoke::{RevokeError, Revoked};
 use crate::seal::{MAX_TOKEN_LEN, Platform, Sealer, Subscription};
@@ -66,6 +68,7 @@ pub struct AppState {
     pub sealer: Sealer,
     pub revoked: Arc<Revoked>,
     pub limits: Limits,
+    pub client_key: ClientKey,
     pub apns: Option<Apns>,
     pub fcm: Option<Fcm>,
 }
@@ -111,15 +114,48 @@ impl AppState {
             background: Window::new(l.background_per_hour, 3600),
             alert: Window::new(l.alerts_per_hour, 3600),
             per_server: Window::new(l.per_server_per_minute, 60),
+            subscribe: Window::new(l.subscriptions_per_address_per_hour, 3600),
+            revoke: Window::new(l.revocations_per_address_per_hour, 3600),
         };
         Ok(Arc::new(Self {
             sealer: Sealer::new(&ring),
             revoked,
             limits,
+            client_key: ClientKey::default(),
             apns,
             fcm,
             config,
         }))
+    }
+
+    /// The client's address, for the per-address limits only: the peer,
+    /// or the last `X-Forwarded-For` entry when the peer is a trusted
+    /// proxy (as the relay does).
+    fn client_ip(&self, peer: IpAddr, headers: &HeaderMap) -> IpAddr {
+        if !self.config.trusted_proxies.contains(&peer) {
+            return peer;
+        }
+        headers
+            .get_all("x-forwarded-for")
+            .iter()
+            .filter_map(|v| v.to_str().ok())
+            .flat_map(|v| v.split(','))
+            .next_back()
+            .and_then(|v| v.trim().parse().ok())
+            .unwrap_or(peer)
+    }
+
+    /// Counts a wallet API call against its client's hourly budget.
+    fn limit_client(&self, w: &Window, peer: SocketAddr, headers: &HeaderMap) -> Option<Response> {
+        let key = self.client_key.of(self.client_ip(peer.ip(), headers));
+        w.hit(key, now_unix()).err().map(|retry| {
+            (
+                StatusCode::TOO_MANY_REQUESTS,
+                [(header::RETRY_AFTER, retry.to_string())],
+                "rate limited",
+            )
+                .into_response()
+        })
     }
 }
 
@@ -130,6 +166,12 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/wp/{opaque}", post(push))
         .layer(DefaultBodyLimit::max(MAX_PUSH_BODY * 2))
         .with_state(state)
+}
+
+/// [`router`] as a service that knows each peer's address, which the
+/// per-address limits need. Serve this, not the bare router.
+pub fn app(state: Arc<AppState>) -> IntoMakeServiceWithConnectInfo<Router, SocketAddr> {
+    router(state).into_make_service_with_connect_info::<SocketAddr>()
 }
 
 /// Lowercase hex.
@@ -159,19 +201,32 @@ struct SubscribeRequest {
 }
 
 /// Creates a subscription bound to `server_key` (spec §4.1).
-async fn subscribe(State(state): State<Arc<AppState>>, body: Bytes) -> Response {
+async fn subscribe(
+    State(state): State<Arc<AppState>>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    if let Some(r) = state.limit_client(&state.limits.subscribe, peer, &headers) {
+        return r;
+    }
     let Ok(req) = serde_json::from_slice::<SubscribeRequest>(&body) else {
         return error(StatusCode::BAD_REQUEST, "malformed request");
     };
     let platform = match req.platform.as_str() {
         "apns" if state.apns.is_some() => Platform::Apns,
+        "apns-sandbox" if state.apns.as_ref().is_some_and(Apns::allows_sandbox) => {
+            Platform::ApnsSandbox
+        }
         "fcm" if state.fcm.is_some() => Platform::Fcm,
-        "apns" | "fcm" => return error(StatusCode::BAD_REQUEST, "platform not configured"),
+        "apns" | "apns-sandbox" | "fcm" => {
+            return error(StatusCode::BAD_REQUEST, "platform not configured");
+        }
         _ => return error(StatusCode::BAD_REQUEST, "unknown platform"),
     };
     let token = match platform {
         // APNs device tokens are hex.
-        Platform::Apns => {
+        Platform::Apns | Platform::ApnsSandbox => {
             let t = req.token.trim();
             if t.len() % 2 != 0 || t.len() < 32 || t.len() > 2 * MAX_TOKEN_LEN {
                 return error(StatusCode::BAD_REQUEST, "invalid token");
@@ -228,9 +283,13 @@ async fn subscribe(State(state): State<Arc<AppState>>, body: Bytes) -> Response 
 /// Revokes a subscription (spec §4.1): later pushes to it get `410`.
 async fn revoke(
     State(state): State<Arc<AppState>>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     UrlPath(opaque): UrlPath<String>,
     headers: HeaderMap,
 ) -> Response {
+    if let Some(r) = state.limit_client(&state.limits.revoke, peer, &headers) {
+        return r;
+    }
     let now = now_unix();
     let Some(sub) = state.sealer.open(&opaque) else {
         return error(StatusCode::NOT_FOUND, "no such subscription");
@@ -375,7 +434,8 @@ async fn push(
         topic,
     };
     let delivery = match (sub.platform, &state.apns, &state.fcm) {
-        (Platform::Apns, Some(apns), _) => apns.send(&sub.token, &p, now).await,
+        (Platform::Apns, Some(apns), _) => apns.send(&sub.token, &p, now, false).await,
+        (Platform::ApnsSandbox, Some(apns), _) => apns.send(&sub.token, &p, now, true).await,
         (Platform::Fcm, _, Some(fcm)) => fcm.send(&sub.token, &p).await,
         // The platform was configured when this endpoint was made, but
         // isn't any more: the endpoint can never work again.

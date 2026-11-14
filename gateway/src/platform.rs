@@ -55,6 +55,8 @@ pub enum Delivery {
 pub struct Apns {
     http: reqwest::Client,
     base_url: String,
+    /// For `apns-sandbox` subscriptions, when `allow_sandbox` is on.
+    sandbox_url: Option<String>,
     topic: String,
     team_id: String,
     key_id: String,
@@ -67,6 +69,7 @@ impl std::fmt::Debug for Apns {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Apns")
             .field("base_url", &self.base_url)
+            .field("sandbox_url", &self.sandbox_url)
             .finish_non_exhaustive()
     }
 }
@@ -93,6 +96,7 @@ impl Apns {
         Ok(Self {
             http,
             base_url: config.base_url(),
+            sandbox_url: config.sandbox_url(),
             topic: config.topic.clone(),
             team_id: config.team_id.clone(),
             key_id: config.key_id.clone(),
@@ -122,7 +126,29 @@ impl Apns {
         t
     }
 
-    pub async fn send(&self, device_token: &[u8], push: &Push<'_>, now_unix: u64) -> Delivery {
+    /// Whether `apns-sandbox` subscriptions are accepted.
+    pub fn allows_sandbox(&self) -> bool {
+        self.sandbox_url.is_some()
+    }
+
+    /// Sends to the configured environment, or with `sandbox` to the
+    /// development one (`apns-sandbox`). A sandbox push without
+    /// `allow_sandbox` any more is `Gone`: that endpoint can't work again.
+    pub async fn send(
+        &self,
+        device_token: &[u8],
+        push: &Push<'_>,
+        now_unix: u64,
+        sandbox: bool,
+    ) -> Delivery {
+        let base_url = if sandbox {
+            match &self.sandbox_url {
+                Some(u) => u,
+                None => return Delivery::Gone,
+            }
+        } else {
+            &self.base_url
+        };
         let hex = crate::hex(device_token);
         let lz = URL_SAFE_NO_PAD.encode(push.body);
         let (push_type, priority, payload) = match push.kind {
@@ -147,7 +173,7 @@ impl Apns {
         };
         let mut req = self
             .http
-            .post(format!("{}/3/device/{hex}", self.base_url))
+            .post(format!("{base_url}/3/device/{hex}"))
             .header(
                 "authorization",
                 format!("bearer {}", self.provider_token(now_unix)),
