@@ -59,7 +59,7 @@ services:
     # (README.md, "The image"). To build it here instead, set
     # LZ_RELAY_IMAGE in .env to a local tag: a digest can't name an image
     # you build.
-    image: ${LZ_RELAY_IMAGE:-ghcr.io/principlezerolabs/lantern-zero-relay@sha256:84b8bc008edf11049e01f42e04a3b9984b1874cc5afc0e64e58adc1996161b2a}
+    image: ${LZ_RELAY_IMAGE:-ghcr.io/principlezerolabs/lantern-zero-relay@sha256:6c974143b66a882739ed843d114a6222de2bfdc1ae4807046ba69af6cd929aa0}
     build:
       context: ../..
       dockerfile: relay/Dockerfile
