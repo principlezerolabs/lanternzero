@@ -103,6 +103,26 @@ minutes. FCM uses a service account (`gcp_auth`).
 cargo run -p lz-gateway -- gateway/examples/config.toml
 ```
 
+Releases publish a signed image, `ghcr.io/principlezerolabs/lantern-zero-gateway`
+(linux/amd64 and linux/arm64; `RELEASING.md` says how to verify one). It
+runs as uid 65532 with config at `/etc/lz-gateway/config.toml`:
+
+```sh
+docker run --read-only --cap-drop ALL --security-opt no-new-privileges:true \
+  -v /srv/gateway/config.toml:/etc/lz-gateway/config.toml:ro \
+  -v /srv/gateway/secrets:/etc/lz-gateway/secrets:ro \
+  -v lz-gateway-data:/var/lib/lz-gateway \
+  ghcr.io/principlezerolabs/lantern-zero-gateway@sha256:<digest>
+```
+
+with `listen = "0.0.0.0:8090"`, `data_dir = "/var/lib/lz-gateway"` and
+the credential paths under `/etc/lz-gateway/secrets/`, readable by uid
+65532. A named volume gets the right owner and mode by itself; a host
+directory must be owned by 65532, mode 0700. Back it up: it holds the
+sealing keys. Put TLS, and a per-address limit on `/v0/subscriptions`
+(see "Not yet"), in front. `gateway/smoke-test.sh` builds the image and
+checks it this way (CI runs it).
+
 ### Rotating the sealing key
 
 ```sh
