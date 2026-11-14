@@ -82,6 +82,11 @@ and App Store builds. The app knows which it is from its
 `aps-environment` entitlement. Turning `allow_sandbox` off later makes
 existing `apns-sandbox` endpoints answer `410`.
 
+Apple limits a key to one app only if the key covers one environment.
+To use such keys, give the production one as `key_id` and `key_path`
+and the sandbox one as `sandbox_key_id` and `sandbox_key_path`. Without
+those, a key for both environments signs both.
+
 The wallet registers the endpoint with the server (`POST /v0/devices`) and
 keeps `revoke_secret` on the device; the server never sees it. A wallet
 connected to two servers subscribes twice. Before `expires`, the wallet

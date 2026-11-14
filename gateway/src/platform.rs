@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use p256::ecdsa::signature::Signer;
+use p256::ecdsa::signature::Signer as _;
 use p256::ecdsa::{Signature, SigningKey};
 use p256::pkcs8::DecodePrivateKey;
 use serde_json::json;
@@ -55,53 +55,31 @@ pub enum Delivery {
 pub struct Apns {
     http: reqwest::Client,
     base_url: String,
-    /// For `apns-sandbox` subscriptions, when `allow_sandbox` is on.
-    sandbox_url: Option<String>,
+    signer: ApnsKey,
+    /// For `apns-sandbox` subscriptions, when `allow_sandbox` is on: the
+    /// development host, and its own key if one is configured.
+    sandbox: Option<(String, Option<ApnsKey>)>,
     topic: String,
+    alert_title: String,
+}
+
+/// One APNs auth key and its cached provider token.
+struct ApnsKey {
     team_id: String,
     key_id: String,
     key: SigningKey,
-    alert_title: String,
     token: Mutex<Option<(std::time::Instant, String)>>,
 }
 
-impl std::fmt::Debug for Apns {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Apns")
-            .field("base_url", &self.base_url)
-            .field("sandbox_url", &self.sandbox_url)
-            .finish_non_exhaustive()
-    }
-}
-
-#[derive(Debug, thiserror::Error)]
-pub enum PlatformError {
-    #[error("cannot read key file {0}: {1}")]
-    Read(String, std::io::Error),
-    #[error("invalid APNs key (expected a PKCS#8 .p8 file)")]
-    ApnsKey,
-    #[error("FCM credentials: {0}")]
-    Fcm(String),
-}
-
-impl Apns {
-    pub fn new(
-        http: reqwest::Client,
-        config: &crate::config::ApnsConfig,
-        alert_title: String,
-    ) -> Result<Self, PlatformError> {
-        let pem = std::fs::read_to_string(&config.key_path)
-            .map_err(|e| PlatformError::Read(config.key_path.display().to_string(), e))?;
+impl ApnsKey {
+    fn load(team_id: &str, key_id: &str, path: &std::path::Path) -> Result<Self, PlatformError> {
+        let pem = std::fs::read_to_string(path)
+            .map_err(|e| PlatformError::Read(path.display().to_string(), e))?;
         let key = SigningKey::from_pkcs8_pem(&pem).map_err(|_| PlatformError::ApnsKey)?;
         Ok(Self {
-            http,
-            base_url: config.base_url(),
-            sandbox_url: config.sandbox_url(),
-            topic: config.topic.clone(),
-            team_id: config.team_id.clone(),
-            key_id: config.key_id.clone(),
+            team_id: team_id.to_owned(),
+            key_id: key_id.to_owned(),
             key,
-            alert_title,
             token: Mutex::new(None),
         })
     }
@@ -126,9 +104,60 @@ impl Apns {
         t
     }
 
+    fn forget_token(&self) {
+        *self.token.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    }
+}
+
+impl std::fmt::Debug for Apns {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Apns")
+            .field("base_url", &self.base_url)
+            .field("sandbox_url", &self.sandbox.as_ref().map(|(u, _)| u))
+            .finish_non_exhaustive()
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum PlatformError {
+    #[error("cannot read key file {0}: {1}")]
+    Read(String, std::io::Error),
+    #[error("invalid APNs key (expected a PKCS#8 .p8 file)")]
+    ApnsKey,
+    #[error("FCM credentials: {0}")]
+    Fcm(String),
+}
+
+impl Apns {
+    pub fn new(
+        http: reqwest::Client,
+        config: &crate::config::ApnsConfig,
+        alert_title: String,
+    ) -> Result<Self, PlatformError> {
+        let signer = ApnsKey::load(&config.team_id, &config.key_id, &config.key_path)?;
+        let sandbox = match config.sandbox_url() {
+            Some(url) => {
+                let own = match (&config.sandbox_key_id, &config.sandbox_key_path) {
+                    (Some(id), Some(path)) => Some(ApnsKey::load(&config.team_id, id, path)?),
+                    _ => None,
+                };
+                Some((url, own))
+            }
+            None => None,
+        };
+        Ok(Self {
+            http,
+            base_url: config.base_url(),
+            signer,
+            sandbox,
+            topic: config.topic.clone(),
+            alert_title,
+        })
+    }
+
     /// Whether `apns-sandbox` subscriptions are accepted.
     pub fn allows_sandbox(&self) -> bool {
-        self.sandbox_url.is_some()
+        self.sandbox.is_some()
     }
 
     /// Sends to the configured environment, or with `sandbox` to the
@@ -141,13 +170,13 @@ impl Apns {
         now_unix: u64,
         sandbox: bool,
     ) -> Delivery {
-        let base_url = if sandbox {
-            match &self.sandbox_url {
-                Some(u) => u,
+        let (base_url, signer) = if sandbox {
+            match &self.sandbox {
+                Some((u, own)) => (u, own.as_ref().unwrap_or(&self.signer)),
                 None => return Delivery::Gone,
             }
         } else {
-            &self.base_url
+            (&self.base_url, &self.signer)
         };
         let hex = crate::hex(device_token);
         let lz = URL_SAFE_NO_PAD.encode(push.body);
@@ -176,7 +205,7 @@ impl Apns {
             .post(format!("{base_url}/3/device/{hex}"))
             .header(
                 "authorization",
-                format!("bearer {}", self.provider_token(now_unix)),
+                format!("bearer {}", signer.provider_token(now_unix)),
             )
             .header("apns-topic", &self.topic)
             .header("apns-push-type", push_type)
@@ -212,7 +241,7 @@ impl Apns {
             (410, _) | (400, "BadDeviceToken" | "DeviceTokenNotForTopic") => Delivery::Gone,
             (429, _) => Delivery::RateLimited(retry),
             (403, "ExpiredProviderToken" | "InvalidProviderToken") => {
-                *self.token.lock().unwrap_or_else(|e| e.into_inner()) = None;
+                signer.forget_token();
                 tracing::warn!(reason, "APNs rejected the provider token");
                 Delivery::Failed
             }

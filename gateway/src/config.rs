@@ -63,6 +63,14 @@ pub struct ApnsConfig {
     /// both. Leave it off for a gateway that only release builds use.
     #[serde(default)]
     pub allow_sandbox: bool,
+    /// A separate key for `apns-sandbox`, such as an Apple key limited to
+    /// this app and the development environment (Apple scopes a key to
+    /// one app only if it covers one environment). Without it, the main
+    /// key is used for both. Set both or neither.
+    #[serde(default)]
+    pub sandbox_key_id: Option<String>,
+    #[serde(default)]
+    pub sandbox_key_path: Option<PathBuf>,
     /// Overrides the APNs host, for tests.
     #[serde(default)]
     pub base_url: Option<String>,
@@ -173,6 +181,8 @@ pub enum ConfigError {
     Lifetime,
     #[error("[limits] per-address limits must be at least 1")]
     Limits,
+    #[error("[apns] sandbox_key_id and sandbox_key_path go together, with allow_sandbox")]
+    SandboxKey,
 }
 
 impl Config {
@@ -201,6 +211,12 @@ impl Config {
         }
         if !(1..=crate::keys::MAX_LIFETIME_DAYS).contains(&self.endpoint_lifetime_days) {
             return Err(ConfigError::Lifetime);
+        }
+        if let Some(a) = &self.apns
+            && (a.sandbox_key_id.is_some() != a.sandbox_key_path.is_some()
+                || (a.sandbox_key_id.is_some() && !a.allow_sandbox))
+        {
+            return Err(ConfigError::SandboxKey);
         }
         if self.limits.subscriptions_per_address_per_hour == 0
             || self.limits.revocations_per_address_per_hour == 0
